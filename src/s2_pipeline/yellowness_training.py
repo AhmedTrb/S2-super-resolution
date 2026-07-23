@@ -183,6 +183,9 @@ def fit_regressor(
     freeze_backbone: bool = False,
     unfreeze_epoch: Optional[int] = None,
     backbone_learning_rate: Optional[float] = None,
+    early_stopping_patience: int | None = None,   # NEW
+    early_stopping_min_delta: float = 0.0,        # NEW
+    verbose: bool = True,                          # NEW
 ) -> Dict[str, Any]:
     def set_backbone_trainable(trainable: bool) -> None:
         setter = getattr(model, "set_backbone_trainable", None)
@@ -223,6 +226,9 @@ def fit_regressor(
     best_rmse = float("inf")
     backbone_unfrozen = False
 
+    best_val = float("inf")
+    epochs_no_improve = 0
+
     for epoch in range(1, epochs + 1):
         if freeze_backbone and unfreeze_epoch and (not backbone_unfrozen) and epoch >= unfreeze_epoch:
             set_backbone_trainable(True)
@@ -233,9 +239,29 @@ def fit_regressor(
         val_metrics = evaluate_regressor(model, val_loader, device)
         record = {"epoch": float(epoch), "train_loss": train_loss, **val_metrics}
         history.append(record)
-        if val_metrics["rmse"] < best_rmse:
-            best_rmse = val_metrics["rmse"]
-            best_state = {key: value.detach().cpu().clone() for key, value in model.state_dict().items()}
+
+        if verbose:
+            print(
+                f"[Epoch {epoch:03d}/{epochs}] "
+                f"train_loss={train_loss:.6f} val_loss={val_metrics['rmse']:.6f} "
+                f"train_mae={val_metrics['mae']:.6f} val_mae={val_metrics['rmse']:.6f}"
+            )
+
+        # Early stopping on val_loss
+        if val_metrics["rmse"] < (best_val - early_stopping_min_delta):
+            best_val = val_metrics["rmse"]
+            epochs_no_improve = 0
+            # ...existing best checkpoint logic...
+        else:
+            epochs_no_improve += 1
+
+        if early_stopping_patience is not None and epochs_no_improve >= early_stopping_patience:
+            if verbose:
+                print(
+                    f"Early stopping triggered at epoch {epoch} "
+                    f"(no val_loss improvement for {early_stopping_patience} epochs)."
+                )
+            break
 
     if best_state is not None:
         model.load_state_dict(best_state)
