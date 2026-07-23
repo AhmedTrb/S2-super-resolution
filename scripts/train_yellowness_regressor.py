@@ -1,14 +1,13 @@
-#!/usr/bin/env python3
-
 from __future__ import annotations
 
 import argparse
 import json
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import torch
+from torch.utils.data import DataLoader, Dataset
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -38,6 +37,79 @@ def resolve_backbone(backbone: str, torchgeo_weight: Optional[str]) -> str:
     return infer_torchgeo_backbone_from_weight(torchgeo_weight)
 
 
+def _center_crop_last2d(x: torch.Tensor, crop_size: int) -> torch.Tensor:
+    if x.ndim < 2:
+        return x
+    h, w = x.shape[-2], x.shape[-1]
+    if crop_size is None or crop_size <= 0 or (crop_size == h and crop_size == w):
+        return x
+    if crop_size > h or crop_size > w:
+        raise ValueError(f"crop_size={crop_size} is larger than sample size {(h, w)}")
+    top = (h - crop_size) // 2
+    left = (w - crop_size) // 2
+    return x[..., top : top + crop_size, left : left + crop_size]
+
+
+def _rotate_last2d(x: torch.Tensor, k: int) -> torch.Tensor:
+    if x.ndim < 2 or k % 4 == 0:
+        return x
+    return torch.rot90(x, k=k % 4, dims=(-2, -1))
+
+
+def _transform_sample(obj: Any, crop_size: int, rot_k: int) -> Any:
+    if torch.is_tensor(obj):
+        y = _center_crop_last2d(obj, crop_size)
+        y = _rotate_last2d(y, rot_k)
+        return y
+    if isinstance(obj, dict):
+        return {k: _transform_sample(v, crop_size, rot_k) for k, v in obj.items()}
+    if isinstance(obj, tuple):
+        return tuple(_transform_sample(v, crop_size, rot_k) for v in obj)
+    if isinstance(obj, list):
+        return [_transform_sample(v, crop_size, rot_k) for v in obj]
+    return obj
+
+
+class CenterCropRotateDataset(Dataset):
+    """
+    - Center-crops all tensor-like fields on spatial dims (last two dims).
+    - Optionally expands each sample with 4 rotations (0/90/180/270).
+    """
+    def __init__(self, base: Dataset, crop_size: int, enable_rotations: bool) -> None:
+        self.base = base
+        self.crop_size = crop_size
+        self.enable_rotations = enable_rotations
+        self.multiplier = 4 if enable_rotations else 1
+
+    def __len__(self) -> int:
+        return len(self.base) * self.multiplier
+
+    def __getitem__(self, idx: int) -> Any:
+        base_idx = idx % len(self.base)
+        rot_k = (idx // len(self.base)) if self.enable_rotations else 0
+        sample = self.base[base_idx]
+        return _transform_sample(sample, self.crop_size, rot_k)
+
+
+def _rebuild_loader(
+    base_loader: DataLoader,
+    dataset: Dataset,
+    *,
+    shuffle: bool,
+    batch_size: int,
+    num_workers: int,
+) -> DataLoader:
+    return DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=shuffle,
+        num_workers=num_workers,
+        collate_fn=base_loader.collate_fn,
+        pin_memory=getattr(base_loader, "pin_memory", False),
+        drop_last=getattr(base_loader, "drop_last", False),
+    )
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train a patch+mask yellowness regressor.")
     parser.add_argument("--inventory", type=Path, default=Path("yellowness_dataset") / "observations_inventory_all_feature_new.csv")
@@ -58,8 +130,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-freeze-backbone", dest="freeze_backbone", action="store_false")
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--sample-patch-size", type=int, default=256)
+
+    # New: center crop + rotation augmentation
+    parser.add_argument("--center-crop-size", type=int, default=224)
+    parser.add_argument("--rotate-augment", dest="rotate_augment", action="store_true")
+    parser.add_argument("--no-rotate-augment", dest="rotate_augment", action="store_false")
+
     parser.add_argument("--output-dir", type=Path, default=Path("outputs") / "yellowness_regression")
-    parser.set_defaults(freeze_backbone=True)
+
+    # NEW
+    parser.add_argument("--early-stopping-patience", type=int, default=8)
+    parser.add_argument("--early-stopping-min-delta", type=float, default=0.0)
+    parser.add_argument("--no-early-stopping", dest="use_early_stopping", action="store_false")
+    parser.add_argument("--data-parallel", action="store_true")
+
+    parser.set_defaults(freeze_backbone=True, rotate_augment=True, use_early_stopping=True)
     return parser.parse_args()
 
 
@@ -75,8 +160,37 @@ def main() -> None:
         test_size=args.test_size,
         random_state=args.random_state,
     )
-    train_loader = make_dataloader(split.train, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers)
-    val_loader = make_dataloader(split.val, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
+
+    # Build base loaders first
+    train_base_loader = make_dataloader(split.train, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers)
+    val_base_loader = make_dataloader(split.val, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
+
+    # Wrap datasets: train = crop + rotations, val = crop only
+    train_dataset = CenterCropRotateDataset(
+        train_base_loader.dataset,
+        crop_size=args.center_crop_size,
+        enable_rotations=args.rotate_augment,
+    )
+    val_dataset = CenterCropRotateDataset(
+        val_base_loader.dataset,
+        crop_size=args.center_crop_size,
+        enable_rotations=False,
+    )
+
+    train_loader = _rebuild_loader(
+        train_base_loader,
+        train_dataset,
+        shuffle=True,
+        batch_size=args.batch_size,
+        num_workers=args.num_workers,
+    )
+    val_loader = _rebuild_loader(
+        val_base_loader,
+        val_dataset,
+        shuffle=False,
+        batch_size=args.batch_size,
+        num_workers=args.num_workers,
+    )
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = build_yellowness_model(
@@ -85,8 +199,13 @@ def main() -> None:
         torchgeo_weight=args.torchgeo_weight,
         freeze_backbone=args.freeze_backbone,
         image_channels=10,
-        sample_patch_size=args.sample_patch_size,
+        sample_patch_size=args.center_crop_size,  # use cropped spatial size
     )
+
+    # NEW
+    if args.data_parallel and torch.cuda.device_count() > 1:
+        print(f"Using DataParallel on {torch.cuda.device_count()} GPUs")
+        model = torch.nn.DataParallel(model)
 
     result = fit_regressor(
         model=model,
@@ -99,12 +218,18 @@ def main() -> None:
         freeze_backbone=args.freeze_backbone,
         unfreeze_epoch=args.unfreeze_epoch if args.unfreeze_epoch > 0 else None,
         backbone_learning_rate=args.backbone_learning_rate,
+        # NEW (requires fit_regressor update below)
+        early_stopping_patience=(args.early_stopping_patience if args.use_early_stopping else None),
+        early_stopping_min_delta=args.early_stopping_min_delta,
+        verbose=True,
     )
 
     checkpoint_path = args.output_dir / "best_model.pt"
+    # NEW: save wrapped model correctly
+    model_to_save = result["model"].module if isinstance(result["model"], torch.nn.DataParallel) else result["model"]
+    torch.save(model_to_save.state_dict(), checkpoint_path)
     history_path = args.output_dir / "training_history.json"
     run_config_path = args.output_dir / "run_config.json"
-    torch.save(result["model"].state_dict(), checkpoint_path)
     history_path.write_text(json.dumps(result["history"], indent=2), encoding="utf-8")
     run_config_path.write_text(
         json.dumps(
@@ -124,6 +249,9 @@ def main() -> None:
                 "unfreeze_epoch": args.unfreeze_epoch,
                 "test_size": args.test_size,
                 "random_state": args.random_state,
+                "sample_patch_size": args.sample_patch_size,
+                "center_crop_size": args.center_crop_size,
+                "rotate_augment": args.rotate_augment,
                 "best_metrics": result["best_metrics"],
             },
             indent=2,
