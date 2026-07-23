@@ -1,0 +1,10 @@
+torchgeo_yellowness_dataset/
+evaluation_outputs_zone2/
+.env
+test.py
+notebooks/exploratory/data-exploration.ipynb
+data/beetsat_psscene_analytic_sr_udm2/
+model/
+outputs/yellowness_regression/
+yellowness_dataset/
+__pycache__/
