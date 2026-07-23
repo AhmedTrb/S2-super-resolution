@@ -1,0 +1,25 @@
+[project]
+name = "s2-super-resolution"
+version = "0.1.0"
+description = "Sentinel-2 parcel super-resolution and analysis pipeline"
+requires-python = ">=3.10"
+dependencies = [
+  "geopandas",
+  "matplotlib",
+  "mlstac",
+  "numpy",
+  "pandas",
+  "rasterio",
+  "sen2sr",
+  "torch",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
