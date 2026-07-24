@@ -12,6 +12,50 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.model_selection import GroupShuffleSplit
 from torch import nn
 from torch.utils.data import DataLoader, Dataset
+from copy import deepcopy
+
+
+EXPECTED_S2_BAND_ORDER: tuple[str, ...] = (
+    "B02",
+    "B03",
+    "B04",
+    "B05",
+    "B06",
+    "B07",
+    "B08",
+    "B8A",
+    "B11",
+    "B12",
+)
+
+
+def _normalize_band_name(name: str) -> str:
+    text = str(name).strip().upper()
+    if not text:
+        return text
+    if text.startswith("B") and len(text) == 2 and text[1].isdigit():
+        return f"B0{text[1]}"
+    return text
+
+
+def _align_s2_band_order(image: np.ndarray, descriptions: Sequence[str]) -> np.ndarray:
+    if image.shape[0] == len(EXPECTED_S2_BAND_ORDER) and not any(descriptions):
+        return image
+
+    normalized = [_normalize_band_name(name) for name in descriptions]
+    index_by_name = {name: idx for idx, name in enumerate(normalized) if name}
+
+    if all(name in index_by_name for name in EXPECTED_S2_BAND_ORDER):
+        ordered_indices = [index_by_name[name] for name in EXPECTED_S2_BAND_ORDER]
+        return image[ordered_indices]
+
+    if image.shape[0] != len(EXPECTED_S2_BAND_ORDER):
+        raise ValueError(
+            "Expected 10 Sentinel-2 bands ordered as "
+            f"{EXPECTED_S2_BAND_ORDER}, but got {image.shape[0]} bands and no usable descriptions."
+        )
+
+    return image
 
 
 def _resolve_first(columns: Iterable[str], options: Sequence[str]) -> Optional[str]:
@@ -74,7 +118,7 @@ class ParcelYellownessDataset(Dataset):
         mask_path = self.root_dir / str(row[self.mask_col])
 
         with rasterio.open(image_path) as src:
-            image = _normalize_image(src.read())
+            image = _normalize_image(_align_s2_band_order(src.read(), src.descriptions))
 
         with rasterio.open(mask_path) as src:
             mask = src.read(1).astype(np.float32)
@@ -172,6 +216,25 @@ def evaluate_regressor(model: nn.Module, dataloader: DataLoader, device: torch.d
     }
 
 
+def evaluate_loss(
+    model: nn.Module,
+    dataloader: DataLoader,
+    device: torch.device,
+    loss_fn: nn.Module,
+) -> float:
+    model.eval()
+    losses: list[float] = []
+    with torch.no_grad():
+        for batch in dataloader:
+            image = batch["image"].to(device)
+            mask = batch["mask"].to(device)
+            target = batch["target"].to(device)
+            pred = model(image, mask)
+            loss = loss_fn(pred, target)
+            losses.append(float(loss.detach().cpu()))
+    return float(np.mean(losses)) if losses else float("nan")
+
+
 def fit_regressor(
     model: nn.Module,
     train_loader: DataLoader,
@@ -183,14 +246,26 @@ def fit_regressor(
     freeze_backbone: bool = False,
     unfreeze_epoch: Optional[int] = None,
     backbone_learning_rate: Optional[float] = None,
-    early_stopping_patience: int | None = None,   # NEW
-    early_stopping_min_delta: float = 0.0,        # NEW
-    verbose: bool = True,                          # NEW
+    early_stopping_patience: int | None = None,
+    early_stopping_min_delta: float = 0.0,
+    plateau_unfreeze_patience: int | None = None,
+    plateau_unfreeze_min_delta: float = 0.0,
+    unfreeze_last_stages: int = 0,
+    verbose: bool = True,
 ) -> Dict[str, Any]:
+    base_model = model.module if isinstance(model, nn.DataParallel) else model
+
     def set_backbone_trainable(trainable: bool) -> None:
-        setter = getattr(model, "set_backbone_trainable", None)
+        setter = getattr(base_model, "set_backbone_trainable", None)
         if callable(setter):
             setter(trainable)
+
+    def unfreeze_backbone_for_finetune(num_stages: int) -> None:
+        unfreezer = getattr(base_model, "unfreeze_last_backbone_stages", None)
+        if callable(unfreezer):
+            unfreezer(num_stages)
+        else:
+            set_backbone_trainable(True)
 
     def build_optimizer(backbone_lr: Optional[float]) -> torch.optim.Optimizer:
         if backbone_lr is None:
@@ -223,39 +298,69 @@ def fit_regressor(
     loss_fn = nn.SmoothL1Loss()
     history: list[Dict[str, float]] = []
     best_state: Optional[Dict[str, torch.Tensor]] = None
-    best_rmse = float("inf")
     backbone_unfrozen = False
 
-    best_val = float("inf")
-    epochs_no_improve = 0
+    best_val_loss = float("inf")
+    best_val_rmse = float("inf")
+    stop_epochs_no_improve = 0
+    unfreeze_epochs_no_improve = 0
 
     for epoch in range(1, epochs + 1):
         if freeze_backbone and unfreeze_epoch and (not backbone_unfrozen) and epoch >= unfreeze_epoch:
-            set_backbone_trainable(True)
+            unfreeze_backbone_for_finetune(unfreeze_last_stages)
             optimizer = build_optimizer(backbone_learning_rate)
             backbone_unfrozen = True
 
         train_loss = train_one_epoch(model, train_loader, optimizer, device, loss_fn)
+        val_loss = evaluate_loss(model, val_loader, device, loss_fn)
         val_metrics = evaluate_regressor(model, val_loader, device)
-        record = {"epoch": float(epoch), "train_loss": train_loss, **val_metrics}
+        record = {
+            "epoch": float(epoch),
+            "train_loss": train_loss,
+            "val_loss": val_loss,
+            **val_metrics,
+            "backbone_unfrozen": float(backbone_unfrozen),
+        }
         history.append(record)
 
         if verbose:
             print(
                 f"[Epoch {epoch:03d}/{epochs}] "
-                f"train_loss={train_loss:.6f} val_loss={val_metrics['rmse']:.6f} "
-                f"train_mae={val_metrics['mae']:.6f} val_mae={val_metrics['rmse']:.6f}"
+                f"train_loss={train_loss:.6f} val_loss={val_loss:.6f} "
+                f"val_mae={val_metrics['mae']:.6f} val_rmse={val_metrics['rmse']:.6f}"
             )
 
-        # Early stopping on val_loss
-        if val_metrics["rmse"] < (best_val - early_stopping_min_delta):
-            best_val = val_metrics["rmse"]
-            epochs_no_improve = 0
-            # ...existing best checkpoint logic...
+        if val_loss < (best_val_loss - early_stopping_min_delta):
+            best_val_loss = val_loss
+            best_val_rmse = val_metrics["rmse"]
+            stop_epochs_no_improve = 0
+            best_state = deepcopy(model.state_dict())
         else:
-            epochs_no_improve += 1
+            stop_epochs_no_improve += 1
 
-        if early_stopping_patience is not None and epochs_no_improve >= early_stopping_patience:
+        if val_metrics["rmse"] < (best_val_rmse - plateau_unfreeze_min_delta):
+            best_val_rmse = val_metrics["rmse"]
+            unfreeze_epochs_no_improve = 0
+        else:
+            unfreeze_epochs_no_improve += 1
+
+        if (
+            freeze_backbone
+            and not backbone_unfrozen
+            and plateau_unfreeze_patience is not None
+            and unfreeze_epochs_no_improve >= plateau_unfreeze_patience
+        ):
+            unfreeze_backbone_for_finetune(unfreeze_last_stages)
+            optimizer = build_optimizer(backbone_learning_rate)
+            backbone_unfrozen = True
+            unfreeze_epochs_no_improve = 0
+            if verbose:
+                stage_msg = "all stages" if unfreeze_last_stages <= 0 else f"last {unfreeze_last_stages} stages"
+                print(
+                    f"Validation RMSE plateau detected at epoch {epoch}; unfreezing {stage_msg} for fine-tuning."
+                )
+
+        if early_stopping_patience is not None and stop_epochs_no_improve >= early_stopping_patience:
             if verbose:
                 print(
                     f"Early stopping triggered at epoch {epoch} "
@@ -266,8 +371,11 @@ def fit_regressor(
     if best_state is not None:
         model.load_state_dict(best_state)
 
+    final_metrics = evaluate_regressor(model, val_loader, device)
+    final_metrics["val_loss"] = evaluate_loss(model, val_loader, device, loss_fn)
+
     return {
         "model": model,
         "history": history,
-        "best_metrics": evaluate_regressor(model, val_loader, device),
+        "best_metrics": final_metrics,
     }

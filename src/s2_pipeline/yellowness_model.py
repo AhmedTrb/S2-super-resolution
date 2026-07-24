@@ -14,6 +14,7 @@ class MaskFusionMode(str, Enum):
     MASK_AS_CHANNEL = "mask_as_channel"
     IMAGE_AND_MASK = "image_and_mask"
     LATE_MASK = "late_mask"
+    FEATURE_MASK_POOL = "feature_mask_pool"
 
 
 @dataclass(frozen=True)
@@ -167,6 +168,28 @@ class TorchGeoBackboneAdapter(nn.Module):
             return self.model.forward_features(x)
         return self.model(x)
 
+    def get_finetune_stages(self) -> list[nn.Module]:
+        model = self.model
+
+        blocks = getattr(model, "blocks", None)
+        if isinstance(blocks, (nn.ModuleList, nn.Sequential)) and len(blocks) > 0:
+            return list(blocks)
+
+        layers = getattr(model, "layers", None)
+        if isinstance(layers, (nn.ModuleList, nn.Sequential)) and len(layers) > 0:
+            return list(layers)
+
+        resnet_stages: list[nn.Module] = []
+        for name in ("layer1", "layer2", "layer3", "layer4"):
+            stage = getattr(model, name, None)
+            if isinstance(stage, nn.Module):
+                resnet_stages.append(stage)
+        if resnet_stages:
+            return resnet_stages
+
+        children = list(model.children())
+        return children if children else [model]
+
 
 class MaskFeatureEncoder(nn.Module):
     """Encode simple parcel-mask summary statistics for late fusion."""
@@ -266,9 +289,25 @@ class MaskedYellownessRegressor(nn.Module):
         for parameter in self.backbone.parameters():
             parameter.requires_grad = trainable
 
+    def unfreeze_last_backbone_stages(self, num_stages: int) -> None:
+        if num_stages <= 0:
+            self.set_backbone_trainable(True)
+            return
+
+        self.set_backbone_trainable(False)
+        if hasattr(self.backbone, "get_finetune_stages"):
+            stages = self.backbone.get_finetune_stages()
+        else:
+            children = list(self.backbone.children())
+            stages = children if children else [self.backbone]
+
+        for stage in stages[-num_stages:]:
+            for parameter in stage.parameters():
+                parameter.requires_grad = True
+
     @staticmethod
     def _fused_input_channels(image_channels: int, mode: MaskFusionMode) -> int:
-        if mode in {MaskFusionMode.IMAGE_ONLY, MaskFusionMode.MASKED_IMAGE, MaskFusionMode.LATE_MASK}:
+        if mode in {MaskFusionMode.IMAGE_ONLY, MaskFusionMode.MASKED_IMAGE, MaskFusionMode.LATE_MASK, MaskFusionMode.FEATURE_MASK_POOL}:
             return image_channels
         if mode == MaskFusionMode.MASK_AS_CHANNEL:
             return image_channels + 1
@@ -276,7 +315,11 @@ class MaskedYellownessRegressor(nn.Module):
             return (image_channels * 2) + 1
         raise ValueError(f"Unsupported mask fusion mode: {mode}")
 
-    def _prepare_backbone_input(self, image: torch.Tensor, mask: torch.Tensor) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+    def _prepare_backbone_input(
+        self,
+        image: torch.Tensor,
+        mask: torch.Tensor,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
         if mask.ndim == 3:
             mask = mask.unsqueeze(1)
         mask = mask.to(dtype=image.dtype)
@@ -284,22 +327,59 @@ class MaskedYellownessRegressor(nn.Module):
         if self.mask_fusion == MaskFusionMode.IMAGE_ONLY:
             fused = image
             aux = None
+            feature_mask = None
         elif self.mask_fusion == MaskFusionMode.MASKED_IMAGE:
             fused = image * mask
             aux = None
+            feature_mask = None
         elif self.mask_fusion == MaskFusionMode.MASK_AS_CHANNEL:
             fused = torch.cat([image, mask], dim=1)
             aux = None
+            feature_mask = None
         elif self.mask_fusion == MaskFusionMode.IMAGE_AND_MASK:
             fused = torch.cat([image, image * mask, mask], dim=1)
             aux = None
+            feature_mask = None
         elif self.mask_fusion == MaskFusionMode.LATE_MASK:
             fused = image
             aux = self.mask_encoder(mask)
+            feature_mask = None
+        elif self.mask_fusion == MaskFusionMode.FEATURE_MASK_POOL:
+            fused = image
+            aux = None
+            feature_mask = mask
         else:
             raise ValueError(f"Unsupported mask fusion mode: {self.mask_fusion}")
 
-        return self.input_adapter(fused), aux
+        return self.input_adapter(fused), aux, feature_mask
+
+    def _apply_feature_mask(self, features: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        if features.ndim == 4:
+            resized_mask = nn.functional.interpolate(mask, size=features.shape[-2:], mode="nearest")
+            return features * resized_mask
+
+        if features.ndim == 3 and features.shape[1] >= features.shape[2]:
+            num_tokens = features.shape[1]
+            spatial_tokens = features
+            cls_token: Optional[torch.Tensor] = None
+
+            side = int(round((num_tokens - 1) ** 0.5))
+            if side * side == (num_tokens - 1):
+                cls_token = features[:, :1, :]
+                spatial_tokens = features[:, 1:, :]
+            else:
+                side = int(round(num_tokens ** 0.5))
+                if side * side != num_tokens:
+                    return features
+
+            resized_mask = nn.functional.interpolate(mask, size=(side, side), mode="nearest")
+            flat_mask = resized_mask.flatten(2).transpose(1, 2)
+            masked_tokens = spatial_tokens * flat_mask
+            if cls_token is not None:
+                return torch.cat([cls_token, masked_tokens], dim=1)
+            return masked_tokens
+
+        return features
 
     def _extract_tensor(self, output: Any) -> torch.Tensor:
         if isinstance(output, torch.Tensor):
@@ -331,9 +411,11 @@ class MaskedYellownessRegressor(nn.Module):
         return torch.flatten(features, start_dim=1)
 
     def extract_features(self, image: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-        backbone_input, aux_features = self._prepare_backbone_input(image, mask)
+        backbone_input, aux_features, feature_mask = self._prepare_backbone_input(image, mask)
         raw_features = self.backbone(backbone_input)
         tensor_features = self._extract_tensor(raw_features)
+        if feature_mask is not None:
+            tensor_features = self._apply_feature_mask(tensor_features, feature_mask)
         pooled_features = self._pool_features(tensor_features)
         if aux_features is not None:
             pooled_features = torch.cat([pooled_features, aux_features], dim=1)

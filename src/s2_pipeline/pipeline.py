@@ -638,6 +638,9 @@ class ObservationDrivenS2Pipeline:
                 dst.write(array.astype(np.float32 if np.issubdtype(array.dtype, np.floating) else np.uint8), 1)
             else:
                 dst.write(array)
+            if count == len(BAND_NAMES):
+                for band_index, band_name in enumerate(BAND_NAMES, start=1):
+                    dst.set_band_description(band_index, band_name)
 
     @staticmethod
     def _release_gpu_memory() -> None:

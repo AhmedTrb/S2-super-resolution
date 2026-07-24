@@ -124,6 +124,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument("--backbone-learning-rate", type=float, default=1e-4)
     parser.add_argument("--unfreeze-epoch", type=int, default=0)
+    parser.add_argument("--plateau-unfreeze-patience", type=int, default=4)
+    parser.add_argument("--plateau-unfreeze-min-delta", type=float, default=0.0)
+    parser.add_argument("--unfreeze-last-stages", type=int, default=2)
     parser.add_argument("--test-size", type=float, default=0.2)
     parser.add_argument("--random-state", type=int, default=42)
     parser.add_argument("--freeze-backbone", dest="freeze_backbone", action="store_true")
@@ -218,9 +221,11 @@ def main() -> None:
         freeze_backbone=args.freeze_backbone,
         unfreeze_epoch=args.unfreeze_epoch if args.unfreeze_epoch > 0 else None,
         backbone_learning_rate=args.backbone_learning_rate,
-        # NEW (requires fit_regressor update below)
         early_stopping_patience=(args.early_stopping_patience if args.use_early_stopping else None),
         early_stopping_min_delta=args.early_stopping_min_delta,
+        plateau_unfreeze_patience=args.plateau_unfreeze_patience,
+        plateau_unfreeze_min_delta=args.plateau_unfreeze_min_delta,
+        unfreeze_last_stages=args.unfreeze_last_stages,
         verbose=True,
     )
 
@@ -247,11 +252,16 @@ def main() -> None:
                 "weight_decay": args.weight_decay,
                 "freeze_backbone": args.freeze_backbone,
                 "unfreeze_epoch": args.unfreeze_epoch,
+                "plateau_unfreeze_patience": args.plateau_unfreeze_patience,
+                "plateau_unfreeze_min_delta": args.plateau_unfreeze_min_delta,
+                "unfreeze_last_stages": args.unfreeze_last_stages,
                 "test_size": args.test_size,
                 "random_state": args.random_state,
                 "sample_patch_size": args.sample_patch_size,
                 "center_crop_size": args.center_crop_size,
                 "rotate_augment": args.rotate_augment,
+                "early_stopping_patience": args.early_stopping_patience if args.use_early_stopping else None,
+                "early_stopping_min_delta": args.early_stopping_min_delta,
                 "best_metrics": result["best_metrics"],
             },
             indent=2,
