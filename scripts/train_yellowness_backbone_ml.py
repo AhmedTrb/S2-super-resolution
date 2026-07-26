@@ -14,14 +14,12 @@ import pandas as pd
 import torch
 from sklearn.compose import TransformedTargetRegressor
 from sklearn.cross_decomposition import PLSRegression
-from sklearn.ensemble import ExtraTreesRegressor, HistGradientBoostingRegressor, RandomForestRegressor
-from sklearn.linear_model import ElasticNetCV, LassoCV, RidgeCV
+from sklearn.ensemble import ExtraTreesRegressor, RandomForestRegressor
+from sklearn.linear_model import ElasticNetCV, RidgeCV
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.decomposition import PCA
-from sklearn.neighbors import KNeighborsRegressor
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
-from sklearn.svm import LinearSVR, SVR
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -33,15 +31,10 @@ from src.s2_pipeline.yellowness_training import make_dataloader, make_group_spli
 
 ALL_REGRESSORS: tuple[str, ...] = (
     "ridge",
-    "lasso",
     "elastic_net",
-    "svm_linear",
-    "svm_rbf",
-    "knn",
     "pls",
     "random_forest",
     "extra_trees",
-    "hist_gradient_boosting",
     "xgboost",
 )
 
@@ -98,11 +91,16 @@ def parse_args() -> argparse.Namespace:
         choices=["all", *ALL_DR_METHODS],
     )
     parser.add_argument(
-        "--component-grid",
-        nargs="+",
+        "--pca-variance",
+        type=float,
+        default=0.95,
+        help="Fraction of variance to preserve with PCA.",
+    )
+    parser.add_argument(
+        "--pls-top-k",
         type=int,
-        default=[8, 16, 32, 64, 128, 256],
-        help="Component candidates for PCA/PLS sweeps.",
+        default=8,
+        help="Number of target-correlated features to keep before PLS.",
     )
     parser.add_argument("--save-feature-csv", dest="save_feature_csv", action="store_true")
     parser.add_argument("--no-save-feature-csv", dest="save_feature_csv", action="store_false")
@@ -127,16 +125,6 @@ def build_regressor(name: str, random_state: int) -> Any:
             )
         )
 
-    if name == "lasso":
-        return TransformedTargetRegressor(
-            regressor=Pipeline(
-                steps=[
-                    ("scale", StandardScaler()),
-                    ("lasso", LassoCV(alphas=np.logspace(-4, 1, 16), cv=5, random_state=random_state, max_iter=20000)),
-                ]
-            )
-        )
-
     if name == "elastic_net":
         return TransformedTargetRegressor(
             regressor=Pipeline(
@@ -156,42 +144,12 @@ def build_regressor(name: str, random_state: int) -> Any:
             )
         )
 
-    if name == "svm_linear":
-        return TransformedTargetRegressor(
-            regressor=Pipeline(
-                steps=[
-                    ("scale", StandardScaler()),
-                    ("svm", LinearSVR(C=1.0, epsilon=0.1, random_state=random_state, max_iter=20000)),
-                ]
-            )
-        )
-
-    if name == "svm_rbf":
-        return TransformedTargetRegressor(
-            regressor=Pipeline(
-                steps=[
-                    ("scale", StandardScaler()),
-                    ("svm", SVR(C=10.0, epsilon=0.1, kernel="rbf", gamma="scale")),
-                ]
-            )
-        )
-
-    if name == "knn":
-        return TransformedTargetRegressor(
-            regressor=Pipeline(
-                steps=[
-                    ("scale", StandardScaler()),
-                    ("knn", KNeighborsRegressor(n_neighbors=9, weights="distance")),
-                ]
-            )
-        )
-
     if name == "pls":
         return TransformedTargetRegressor(
             regressor=Pipeline(
                 steps=[
                     ("scale", StandardScaler()),
-                    ("pls", PLSRegression(n_components=16)),
+                    ("pls", PLSRegression(n_components=8)),
                 ]
             )
         )
@@ -209,15 +167,6 @@ def build_regressor(name: str, random_state: int) -> Any:
             n_estimators=500,
             min_samples_leaf=2,
             n_jobs=-1,
-            random_state=random_state,
-        )
-
-    if name == "hist_gradient_boosting":
-        return HistGradientBoostingRegressor(
-            learning_rate=0.05,
-            max_depth=6,
-            max_iter=500,
-            l2_regularization=1e-3,
             random_state=random_state,
         )
 
@@ -280,6 +229,34 @@ def _resolve_requested(values: list[str], all_values: tuple[str, ...]) -> list[s
 def _component_candidates(grid: list[int], max_components: int) -> list[int]:
     cleaned = sorted(set(int(v) for v in grid if int(v) > 0 and int(v) <= max_components))
     return cleaned
+
+
+def _rank_features_by_target_correlation(train_features: np.ndarray, y_train: np.ndarray) -> np.ndarray:
+    features = np.asarray(train_features, dtype=np.float64)
+    target = np.asarray(y_train, dtype=np.float64)
+    target_centered = target - target.mean()
+    feature_centered = features - features.mean(axis=0, keepdims=True)
+
+    numerator = np.sum(feature_centered * target_centered[:, None], axis=0)
+    denominator = np.sqrt(np.sum(feature_centered ** 2, axis=0) * np.sum(target_centered ** 2))
+    correlations = np.zeros(features.shape[1], dtype=np.float64)
+    valid = denominator > 0
+    correlations[valid] = np.abs(numerator[valid] / denominator[valid])
+    return np.argsort(-correlations, kind="stable")
+
+
+def _select_target_correlated_features(
+    train_features: np.ndarray,
+    y_train: np.ndarray,
+    val_features: np.ndarray,
+    top_k: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    if top_k <= 0:
+        raise ValueError("top_k must be a positive integer for PLS feature selection.")
+
+    ranking = _rank_features_by_target_correlation(train_features, y_train)
+    selected_indices = ranking[: min(top_k, train_features.shape[1])]
+    return train_features[:, selected_indices], val_features[:, selected_indices], selected_indices
 
 
 def _save_embeddings_csv(
@@ -350,33 +327,46 @@ def _fit_dimensionality_reduction(
     train_features: np.ndarray,
     y_train: np.ndarray,
     val_features: np.ndarray,
+    pca_variance: float,
+    pls_top_k: int,
 ) -> tuple[np.ndarray, np.ndarray, Any, str]:
     if method == "none":
         return train_features, val_features, None, "none"
-
-    if n_components is None:
-        raise ValueError(f"n_components is required for dimensionality reduction method '{method}'.")
 
     if method == "pca":
         scaler = StandardScaler()
         train_scaled = scaler.fit_transform(train_features)
         val_scaled = scaler.transform(val_features)
-        pca = PCA(n_components=n_components, random_state=0)
+        pca = PCA(n_components=pca_variance, random_state=0)
         train_reduced = pca.fit_transform(train_scaled)
         val_reduced = pca.transform(val_scaled)
-        artifact = {"scaler": scaler, "pca": pca}
-        return train_reduced, val_reduced, artifact, f"pca_{n_components:03d}"
+        artifact = {"scaler": scaler, "pca": pca, "variance_threshold": pca_variance}
+        return train_reduced, val_reduced, artifact, "pca_095"
 
     if method == "pls":
+        selected_train, selected_val, selected_indices = _select_target_correlated_features(
+            train_features,
+            y_train,
+            val_features,
+            pls_top_k,
+        )
         scaler = StandardScaler()
-        train_scaled = scaler.fit_transform(train_features)
-        val_scaled = scaler.transform(val_features)
+        train_scaled = scaler.fit_transform(selected_train)
+        val_scaled = scaler.transform(selected_val)
+        max_valid_components = int(min(train_scaled.shape[0] - 1, train_scaled.shape[1]))
+        if max_valid_components < 1:
+            raise ValueError("PLS requires at least two training samples and one selected feature.")
+        n_components = min(int(pls_top_k), max_valid_components)
         pls = PLSRegression(n_components=n_components)
         pls.fit(train_scaled, y_train)
         train_reduced = pls.transform(train_scaled)
         val_reduced = pls.transform(val_scaled)
-        artifact = {"scaler": scaler, "pls": pls}
-        return train_reduced, val_reduced, artifact, f"pls_{n_components:03d}"
+        artifact = {
+            "scaler": scaler,
+            "pls": pls,
+            "selected_feature_indices": selected_indices.tolist(),
+        }
+        return train_reduced, val_reduced, artifact, f"pls_top{len(selected_indices):03d}_nc{n_components:03d}"
 
     raise ValueError(f"Unsupported dimensionality reduction method '{method}'.")
 
@@ -494,11 +484,6 @@ def main() -> None:
         y_val=y_val,
     )
 
-    max_pca_components = int(min(train_features.shape[0], train_features.shape[1]))
-    max_pls_components = int(min(train_features.shape[0] - 1, train_features.shape[1]))
-    pca_components = _component_candidates(args.component_grid, max_pca_components)
-    pls_components = _component_candidates(args.component_grid, max_pls_components)
-
     dr_sweep_rows: list[dict[str, Any]] = []
     summary_rows: list[dict[str, Any]] = []
     dr_configs: list[tuple[str, Optional[int]]] = []
@@ -506,9 +491,9 @@ def main() -> None:
         if method == "none":
             dr_configs.append(("none", None))
         elif method == "pca":
-            dr_configs.extend(("pca", component) for component in pca_components)
+            dr_configs.append(("pca", None))
         elif method == "pls":
-            dr_configs.extend(("pls", component) for component in pls_components)
+            dr_configs.append(("pls", None))
 
     for dr_method, n_components in dr_configs:
         transformed_train, transformed_val, dr_artifact, dr_label = _fit_dimensionality_reduction(
@@ -517,6 +502,8 @@ def main() -> None:
             train_features,
             y_train,
             val_features,
+            args.pca_variance,
+            args.pls_top_k,
         )
 
         dr_sweep_rows.append(
@@ -525,6 +512,8 @@ def main() -> None:
                 "n_components": n_components,
                 "input_dim": int(train_features.shape[1]),
                 "output_dim": int(transformed_train.shape[1]),
+                "pca_variance": args.pca_variance if dr_method == "pca" else None,
+                "pls_top_k": args.pls_top_k if dr_method == "pls" else None,
             }
         )
 
