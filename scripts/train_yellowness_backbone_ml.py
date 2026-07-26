@@ -12,6 +12,7 @@ from typing import Any, Optional
 import numpy as np
 import pandas as pd
 import torch
+from sklearn.base import BaseEstimator, RegressorMixin
 from sklearn.compose import TransformedTargetRegressor
 from sklearn.cross_decomposition import PLSRegression
 from sklearn.ensemble import ExtraTreesRegressor, RandomForestRegressor
@@ -43,6 +44,27 @@ ALL_DR_METHODS: tuple[str, ...] = (
     "pca",
     "pls",
 )
+
+
+class SafePLSRegressor(BaseEstimator, RegressorMixin):
+    """PLS regressor that caps n_components to the valid bound for the current fit data."""
+
+    def __init__(self, preferred_components: int = 8) -> None:
+        self.preferred_components = preferred_components
+
+    def fit(self, X: np.ndarray, y: np.ndarray) -> "SafePLSRegressor":
+        X_arr = np.asarray(X)
+        max_valid_components = int(min(X_arr.shape[0] - 1, X_arr.shape[1]))
+        if max_valid_components < 1:
+            raise ValueError("PLS regression requires at least two samples and one feature.")
+
+        self.n_components_ = min(int(self.preferred_components), max_valid_components)
+        self.model_ = PLSRegression(n_components=self.n_components_)
+        self.model_.fit(X_arr, y)
+        return self
+
+    def predict(self, X: np.ndarray) -> np.ndarray:
+        return self.model_.predict(X).reshape(-1)
 
 
 def infer_torchgeo_backbone_from_weight(weight_name: str) -> str:
@@ -87,7 +109,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--dr-methods",
         nargs="+",
-        default=["all"],
+        default=["none", "pca"],
         choices=["all", *ALL_DR_METHODS],
     )
     parser.add_argument(
@@ -137,7 +159,7 @@ def build_regressor(name: str, random_state: int) -> Any:
                             l1_ratio=[0.1, 0.3, 0.5, 0.7, 0.9],
                             cv=5,
                             random_state=random_state,
-                            max_iter=20000,
+                            max_iter=100000,
                         ),
                     ),
                 ]
@@ -149,7 +171,7 @@ def build_regressor(name: str, random_state: int) -> Any:
             regressor=Pipeline(
                 steps=[
                     ("scale", StandardScaler()),
-                    ("pls", PLSRegression(n_components=8)),
+                    ("pls", SafePLSRegressor(preferred_components=8)),
                 ]
             )
         )
