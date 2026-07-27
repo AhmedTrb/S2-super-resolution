@@ -21,6 +21,7 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.decomposition import PCA
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
+from torch import nn
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -65,6 +66,15 @@ class SafePLSRegressor(BaseEstimator, RegressorMixin):
 
     def predict(self, X: np.ndarray) -> np.ndarray:
         return self.model_.predict(X).reshape(-1)
+
+
+class BackboneFeatureExtractor(nn.Module):
+    def __init__(self, model: nn.Module) -> None:
+        super().__init__()
+        self.model = model
+
+    def forward(self, image: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        return self.model.extract_features(image, mask)
 
 
 def infer_torchgeo_backbone_from_weight(weight_name: str) -> str:
@@ -158,6 +168,7 @@ def build_regressor(name: str, random_state: int) -> Any:
                             alphas=np.logspace(-4, 1, 16),
                             l1_ratio=[0.1, 0.3, 0.5, 0.7, 0.9],
                             cv=5,
+                            n_jobs=-1,
                             random_state=random_state,
                             max_iter=100000,
                         ),
@@ -206,23 +217,32 @@ def build_regressor(name: str, random_state: int) -> Any:
             colsample_bytree=0.9,
             objective="reg:squarederror",
             random_state=random_state,
+            tree_method="hist",
+            device="cuda" if torch.cuda.is_available() else "cpu",
             n_jobs=4,
         )
 
     raise ValueError(f"Unsupported regressor '{name}'.")
 
 
-def extract_features(model: Any, dataloader: Any, device: torch.device) -> tuple[np.ndarray, np.ndarray, list[str], list[int]]:
+def build_feature_extractor(model: nn.Module, device: torch.device) -> nn.Module:
+    extractor: nn.Module = BackboneFeatureExtractor(model)
+    if device.type == "cuda" and torch.cuda.device_count() > 1:
+        extractor = nn.DataParallel(extractor)
+    return extractor.to(device)
+
+
+def extract_features(model: nn.Module, dataloader: Any, device: torch.device) -> tuple[np.ndarray, np.ndarray, list[str], list[int]]:
     model.eval()
     feature_batches: list[np.ndarray] = []
     target_batches: list[np.ndarray] = []
     plot_ids: list[str] = []
     row_indices: list[int] = []
-    with torch.no_grad():
+    with torch.inference_mode():
         for batch in dataloader:
-            image = batch["image"].to(device)
-            mask = batch["mask"].to(device)
-            features = model.extract_features(image, mask).cpu().numpy()
+            image = batch["image"].to(device, non_blocking=device.type == "cuda")
+            mask = batch["mask"].to(device, non_blocking=device.type == "cuda")
+            features = model(image, mask).cpu().numpy()
             targets = batch["target"].cpu().numpy()
             feature_batches.append(features)
             target_batches.append(targets)
@@ -472,6 +492,8 @@ def main() -> None:
         val_loader = make_dataloader(split.val, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
 
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        if device.type == "cuda":
+            torch.backends.cudnn.benchmark = True
         backbone_name = resolve_backbone(args.backbone, args.torchgeo_weight)
         model = build_yellowness_model(
             backbone_name=backbone_name,
@@ -480,10 +502,11 @@ def main() -> None:
             freeze_backbone=True,
             image_channels=10,
             sample_patch_size=args.center_crop_size,
-        ).to(device)
+        )
+        feature_extractor = build_feature_extractor(model, device)
 
-        train_features, y_train, train_plot_ids, train_row_indices = extract_features(model, train_loader, device)
-        val_features, y_val, val_plot_ids, val_row_indices = extract_features(model, val_loader, device)
+        train_features, y_train, train_plot_ids, train_row_indices = extract_features(feature_extractor, train_loader, device)
+        val_features, y_val, val_plot_ids, val_row_indices = extract_features(feature_extractor, val_loader, device)
 
         if args.save_feature_csv:
             _save_embeddings_csv(

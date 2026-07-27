@@ -241,7 +241,7 @@ class MaskedYellownessRegressor(nn.Module):
         self,
         backbone_name: str = "simple_cnn",
         image_channels: int = 10,
-        mask_fusion: MaskFusionMode = MaskFusionMode.MASK_AS_CHANNEL,
+        mask_fusion: MaskFusionMode = MaskFusionMode.FEATURE_MASK_POOL,
         torchgeo_weight: Optional[str] = None,
         pretrained: bool = True,
         freeze_backbone: bool = False,
