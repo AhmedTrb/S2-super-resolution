@@ -82,6 +82,38 @@ def _resolve_date_column(df: pd.DataFrame) -> Optional[str]:
     return next((column for column in candidates if column in df.columns), None)
 
 
+def _resolve_path_columns(df: pd.DataFrame, resolution: str) -> tuple[Optional[str], Optional[str]]:
+    image_options = {
+        "lr": ("lr_patch", "lr_image_path", "lr_image", "lr_patch_path"),
+        "sr": ("sr_patch", "sr_image_path", "sr_image", "sr_patch_path"),
+    }
+    mask_options = {
+        "lr": ("lr_mask", "lr_mask_path", "mask_path"),
+        "sr": ("sr_mask", "sr_mask_path", "mask_path"),
+    }
+    image_col = _resolve_first(df.columns, image_options[resolution])
+    mask_col = _resolve_first(df.columns, mask_options[resolution])
+    return image_col, mask_col
+
+
+def _filter_missing_rows(df: pd.DataFrame, root_dir: Path, resolution: str) -> pd.DataFrame:
+    image_col, mask_col = _resolve_path_columns(df, resolution)
+    if image_col is None or mask_col is None:
+        raise ValueError(f"Could not resolve {resolution.upper()} image/mask columns in inventory.")
+
+    image_exists = df[image_col].astype(str).map(lambda value: (root_dir / value).exists())
+    mask_exists = df[mask_col].astype(str).map(lambda value: (root_dir / value).exists())
+    keep_mask = image_exists & mask_exists
+    skipped = int((~keep_mask).sum())
+    if skipped:
+        print(f"Skipping {skipped} rows with missing {resolution.upper()} image or mask files.")
+
+    filtered = df.loc[keep_mask].reset_index(drop=True)
+    if filtered.empty:
+        raise ValueError(f"No valid {resolution.upper()} rows remain after removing missing files.")
+    return filtered
+
+
 class ParcelYellownessDataset(Dataset):
     """Return image patch, binary parcel mask, and yellowness target for regression."""
 
@@ -96,20 +128,12 @@ class ParcelYellownessDataset(Dataset):
         self.inventory_path = Path(inventory_csv)
         self.root_dir = Path(root_dir) if root_dir else self.inventory_path.parent
         self.resolution = resolution.lower()
-        self.inventory = rows.copy().reset_index(drop=True) if rows is not None else pd.read_csv(self.inventory_path)
+        raw_inventory = rows.copy().reset_index(drop=True) if rows is not None else pd.read_csv(self.inventory_path)
+        self.inventory = _filter_missing_rows(raw_inventory, self.root_dir, self.resolution)
         self.band_indices = tuple(int(index) for index in band_indices) if band_indices is not None else None
         self.date_col = _resolve_date_column(self.inventory)
 
-        image_options = {
-            "lr": ("lr_patch", "lr_image_path", "lr_image", "lr_patch_path"),
-            "sr": ("sr_patch", "sr_image_path", "sr_image", "sr_patch_path"),
-        }
-        mask_options = {
-            "lr": ("lr_mask", "lr_mask_path", "mask_path"),
-            "sr": ("sr_mask", "sr_mask_path", "mask_path"),
-        }
-        self.image_col = _resolve_first(self.inventory.columns, image_options[self.resolution])
-        self.mask_col = _resolve_first(self.inventory.columns, mask_options[self.resolution])
+        self.image_col, self.mask_col = _resolve_path_columns(self.inventory, self.resolution)
         if self.image_col is None or self.mask_col is None:
             raise ValueError(
                 f"Could not resolve {self.resolution.upper()} image/mask columns in inventory."
@@ -162,7 +186,8 @@ def make_group_split(
     band_indices: Optional[Sequence[int]] = None,
 ) -> SplitDatasets:
     inventory_path = Path(inventory_csv)
-    full_df = pd.read_csv(inventory_path)
+    resolved_root_dir = Path(root_dir) if root_dir else inventory_path.parent
+    full_df = _filter_missing_rows(pd.read_csv(inventory_path), resolved_root_dir, resolution)
     group_column = _resolve_group_column(full_df)
     if group_column is None:
         groups = np.arange(len(full_df))

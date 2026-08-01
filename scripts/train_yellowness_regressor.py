@@ -43,6 +43,16 @@ def resolve_backbone(backbone: str, torchgeo_weight: Optional[str]) -> str:
     return infer_torchgeo_backbone_from_weight(torchgeo_weight)
 
 
+def resolve_backbone_band_indices(weight_name: Optional[str]) -> Optional[list[int]]:
+    if not weight_name:
+        return None
+    if weight_name.startswith("ResNet50_Weights.SENTINEL2_MI_MS_SATLAS"):
+        return [0, 1, 2, 3, 4, 5, 6, 8, 9]
+    if weight_name.startswith("Swin_V2_T_Weights.SENTINEL2_MI_MS_SATLAS"):
+        return [0, 1, 2, 3, 4, 5, 6, 8, 9]
+    return None
+
+
 def _center_crop_last2d(x: torch.Tensor, crop_size: int) -> torch.Tensor:
     if x.ndim < 2:
         return x
@@ -161,6 +171,8 @@ def main() -> None:
     args = parse_args()
     args.output_dir.mkdir(parents=True, exist_ok=True)
     backbone_name = resolve_backbone(args.backbone, args.torchgeo_weight)
+    backbone_band_indices = resolve_backbone_band_indices(args.torchgeo_weight)
+    backbone_image_channels = len(backbone_band_indices) if backbone_band_indices is not None else 10
 
     split = make_group_split(
         inventory_csv=args.inventory,
@@ -168,6 +180,7 @@ def main() -> None:
         resolution=args.resolution,
         test_size=args.test_size,
         random_state=args.random_state,
+        band_indices=backbone_band_indices,
     )
 
     # Build base loaders first
@@ -207,12 +220,14 @@ def main() -> None:
         mask_fusion=args.mask_fusion,
         torchgeo_weight=args.torchgeo_weight,
         freeze_backbone=args.freeze_backbone,
-        image_channels=10,
+        image_channels=backbone_image_channels,
         sample_patch_size=args.center_crop_size,  # use cropped spatial size
+        backbone_band_indices=backbone_band_indices,
     )
 
     # NEW
-    if args.data_parallel and torch.cuda.device_count() > 1:
+    use_data_parallel = args.data_parallel or torch.cuda.device_count() > 1
+    if use_data_parallel and torch.cuda.device_count() > 1:
         print(f"Using DataParallel on {torch.cuda.device_count()} GPUs")
         model = torch.nn.DataParallel(model)
 
