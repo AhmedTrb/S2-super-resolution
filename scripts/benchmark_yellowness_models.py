@@ -21,6 +21,12 @@ def infer_torchgeo_backbone_from_weight(weight_name: str) -> str:
         return "torchgeo:vit_small_patch16_224"
     if weight_name.startswith("ViTBase16_Weights."):
         return "torchgeo:vit_base_patch16_224"
+    if weight_name.startswith("ViTSmall14_DINOv2_Weights."):
+        return "torchgeo:vit_small_patch14_dinov2"
+    if weight_name.startswith("ViTBase14_DINOv2_Weights."):
+        return "torchgeo:vit_base_patch14_dinov2"
+    if weight_name.startswith("Swin_V2_T_Weights."):
+        return "torchgeo:swin_v2_t"
     if weight_name.startswith("FGMAEEarthLoc_Weights.") and "RESNET50" in weight_name.upper():
         return "torchgeo:resnet50"
     raise ValueError("Could not infer a TorchGeo backbone from --torchgeo-weights.")

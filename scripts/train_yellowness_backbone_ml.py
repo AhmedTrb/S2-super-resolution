@@ -84,9 +84,25 @@ def infer_torchgeo_backbone_from_weight(weight_name: str) -> str:
         return "torchgeo:vit_small_patch16_224"
     if weight_name.startswith("ViTBase16_Weights."):
         return "torchgeo:vit_base_patch16_224"
+    if weight_name.startswith("ViTSmall14_DINOv2_Weights."):
+        return "torchgeo:vit_small_patch14_dinov2"
+    if weight_name.startswith("ViTBase14_DINOv2_Weights."):
+        return "torchgeo:vit_base_patch14_dinov2"
+    if weight_name.startswith("Swin_V2_T_Weights."):
+        return "torchgeo:swin_v2_t"
     if weight_name.startswith("FGMAEEarthLoc_Weights.") and "RESNET50" in weight_name.upper():
         return "torchgeo:resnet50"
     raise ValueError("Could not infer a TorchGeo backbone from --torchgeo-weight.")
+
+
+def resolve_backbone_band_indices(weight_name: Optional[str]) -> Optional[list[int]]:
+    if not weight_name:
+        return None
+    if weight_name.startswith("ResNet50_Weights.SENTINEL2_MI_MS_SATLAS"):
+        return [0, 1, 2, 3, 4, 5, 6, 8, 9]
+    if weight_name.startswith("Swin_V2_T_Weights.SENTINEL2_MI_MS_SATLAS"):
+        return [0, 1, 2, 3, 4, 5, 6, 8, 9]
+    return None
 
 
 def resolve_backbone(backbone: str, torchgeo_weight: Optional[str]) -> str:
@@ -232,11 +248,16 @@ def build_feature_extractor(model: nn.Module, device: torch.device) -> nn.Module
     return extractor.to(device)
 
 
-def extract_features(model: nn.Module, dataloader: Any, device: torch.device) -> tuple[np.ndarray, np.ndarray, list[str], list[int]]:
+def extract_features(
+    model: nn.Module,
+    dataloader: Any,
+    device: torch.device,
+) -> tuple[np.ndarray, np.ndarray, list[str], list[str], list[int]]:
     model.eval()
     feature_batches: list[np.ndarray] = []
     target_batches: list[np.ndarray] = []
     plot_ids: list[str] = []
+    observation_dates: list[str] = []
     row_indices: list[int] = []
     with torch.inference_mode():
         for batch in dataloader:
@@ -247,11 +268,13 @@ def extract_features(model: nn.Module, dataloader: Any, device: torch.device) ->
             feature_batches.append(features)
             target_batches.append(targets)
             plot_ids.extend(str(value) for value in batch["id_plot"])
+            observation_dates.extend(str(value) for value in batch.get("observation_date", [""] * len(targets)))
             row_indices.extend(int(value) for value in batch["row_index"])
     return (
         np.concatenate(feature_batches, axis=0),
         np.concatenate(target_batches, axis=0),
         plot_ids,
+        observation_dates,
         row_indices,
     )
 
@@ -306,28 +329,45 @@ def _save_embeddings_csv(
     train_features: np.ndarray,
     y_train: np.ndarray,
     train_plot_ids: list[str],
+    train_observation_dates: list[str],
     train_row_indices: list[int],
     val_features: np.ndarray,
     y_val: np.ndarray,
     val_plot_ids: list[str],
+    val_observation_dates: list[str],
     val_row_indices: list[int],
+    backbone_name: str,
 ) -> None:
     feature_columns = [f"feat_{i:04d}" for i in range(train_features.shape[1])]
 
     train_df = pd.DataFrame(train_features, columns=feature_columns)
     train_df.insert(0, "row_index", train_row_indices)
+    train_df.insert(0, "observation_date", train_observation_dates)
     train_df.insert(0, "id_plot", train_plot_ids)
+    train_df.insert(0, "backbone_name", backbone_name)
     train_df.insert(0, "split", "train")
     train_df["yellowness"] = y_train
 
     val_df = pd.DataFrame(val_features, columns=feature_columns)
     val_df.insert(0, "row_index", val_row_indices)
+    val_df.insert(0, "observation_date", val_observation_dates)
     val_df.insert(0, "id_plot", val_plot_ids)
+    val_df.insert(0, "backbone_name", backbone_name)
     val_df.insert(0, "split", "val")
     val_df["yellowness"] = y_val
 
     combined = pd.concat([train_df, val_df], ignore_index=True)
     combined.to_csv(output_csv, index=False)
+    np.savez_compressed(
+        output_csv.with_suffix(".npz"),
+        features=np.concatenate([train_features, val_features], axis=0),
+        split=combined["split"].to_numpy(dtype=str),
+        id_plot=combined["id_plot"].to_numpy(dtype=str),
+        observation_date=combined["observation_date"].to_numpy(dtype=str),
+        backbone_name=combined["backbone_name"].to_numpy(dtype=str),
+        yellowness=combined["yellowness"].to_numpy(dtype=np.float32),
+        row_index=combined["row_index"].to_numpy(dtype=np.int64),
+    )
 
 
 def _load_embeddings_csv(input_csv: Path) -> tuple[np.ndarray, np.ndarray, list[str], list[int], np.ndarray, np.ndarray, list[str], list[int]]:
@@ -486,6 +526,7 @@ def main() -> None:
             resolution=args.resolution,
             test_size=args.test_size,
             random_state=args.random_state,
+            band_indices=backbone_band_indices,
         )
 
         train_loader = make_dataloader(split.train, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
@@ -495,18 +536,21 @@ def main() -> None:
         if device.type == "cuda":
             torch.backends.cudnn.benchmark = True
         backbone_name = resolve_backbone(args.backbone, args.torchgeo_weight)
+        backbone_band_indices = resolve_backbone_band_indices(args.torchgeo_weight)
+        backbone_image_channels = len(backbone_band_indices) if backbone_band_indices is not None else 10
         model = build_yellowness_model(
             backbone_name=backbone_name,
             mask_fusion=args.mask_fusion,
             torchgeo_weight=args.torchgeo_weight,
             freeze_backbone=True,
-            image_channels=10,
+            image_channels=backbone_image_channels,
             sample_patch_size=args.center_crop_size,
+            backbone_band_indices=backbone_band_indices,
         )
         feature_extractor = build_feature_extractor(model, device)
 
-        train_features, y_train, train_plot_ids, train_row_indices = extract_features(feature_extractor, train_loader, device)
-        val_features, y_val, val_plot_ids, val_row_indices = extract_features(feature_extractor, val_loader, device)
+        train_features, y_train, train_plot_ids, train_observation_dates, train_row_indices = extract_features(feature_extractor, train_loader, device)
+        val_features, y_val, val_plot_ids, val_observation_dates, val_row_indices = extract_features(feature_extractor, val_loader, device)
 
         if args.save_feature_csv:
             _save_embeddings_csv(
@@ -514,11 +558,14 @@ def main() -> None:
                 train_features=train_features,
                 y_train=y_train,
                 train_plot_ids=train_plot_ids,
+                train_observation_dates=train_observation_dates,
                 train_row_indices=train_row_indices,
                 val_features=val_features,
                 y_val=y_val,
                 val_plot_ids=val_plot_ids,
+                val_observation_dates=val_observation_dates,
                 val_row_indices=val_row_indices,
+                backbone_name=backbone_name,
             )
 
     np.savez_compressed(
