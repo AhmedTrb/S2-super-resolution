@@ -370,7 +370,9 @@ def _save_embeddings_csv(
     )
 
 
-def _load_embeddings_csv(input_csv: Path) -> tuple[np.ndarray, np.ndarray, list[str], list[int], np.ndarray, np.ndarray, list[str], list[int]]:
+def _load_embeddings_csv(
+    input_csv: Path,
+) -> tuple[np.ndarray, np.ndarray, list[str], list[str], list[int], np.ndarray, np.ndarray, list[str], list[str], list[int]]:
     df = pd.read_csv(input_csv)
     feature_columns = [column for column in df.columns if column.startswith("feat_")]
     if not feature_columns:
@@ -384,21 +386,25 @@ def _load_embeddings_csv(input_csv: Path) -> tuple[np.ndarray, np.ndarray, list[
     train_features = train_df[feature_columns].to_numpy(dtype=np.float32)
     y_train = train_df["yellowness"].to_numpy(dtype=np.float32)
     train_plot_ids = train_df["id_plot"].astype(str).tolist()
+    train_observation_dates = train_df.get("observation_date", pd.Series("", index=train_df.index)).astype(str).tolist()
     train_row_indices = train_df["row_index"].astype(int).tolist()
 
     val_features = val_df[feature_columns].to_numpy(dtype=np.float32)
     y_val = val_df["yellowness"].to_numpy(dtype=np.float32)
     val_plot_ids = val_df["id_plot"].astype(str).tolist()
+    val_observation_dates = val_df.get("observation_date", pd.Series("", index=val_df.index)).astype(str).tolist()
     val_row_indices = val_df["row_index"].astype(int).tolist()
 
     return (
         train_features,
         y_train,
         train_plot_ids,
+        train_observation_dates,
         train_row_indices,
         val_features,
         y_val,
         val_plot_ids,
+        val_observation_dates,
         val_row_indices,
     )
 
@@ -504,6 +510,7 @@ def main() -> None:
     args.output_dir.mkdir(parents=True, exist_ok=True)
     regressor_names = _resolve_requested(args.regressors, ALL_REGRESSORS)
     dr_methods = _resolve_requested(args.dr_methods, ALL_DR_METHODS)
+    backbone_band_indices = resolve_backbone_band_indices(args.torchgeo_weight)
 
     feature_csv_path = args.output_dir / args.feature_csv_name
 
@@ -512,10 +519,12 @@ def main() -> None:
             train_features,
             y_train,
             train_plot_ids,
+            train_observation_dates,
             train_row_indices,
             val_features,
             y_val,
             val_plot_ids,
+            val_observation_dates,
             val_row_indices,
         ) = _load_embeddings_csv(feature_csv_path)
         backbone_name = resolve_backbone(args.backbone, args.torchgeo_weight)
@@ -536,7 +545,6 @@ def main() -> None:
         if device.type == "cuda":
             torch.backends.cudnn.benchmark = True
         backbone_name = resolve_backbone(args.backbone, args.torchgeo_weight)
-        backbone_band_indices = resolve_backbone_band_indices(args.torchgeo_weight)
         backbone_image_channels = len(backbone_band_indices) if backbone_band_indices is not None else 10
         model = build_yellowness_model(
             backbone_name=backbone_name,
