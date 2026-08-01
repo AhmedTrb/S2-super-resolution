@@ -10,6 +10,7 @@ import rasterio
 import torch
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.model_selection import GroupShuffleSplit
+from sklearn.model_selection import train_test_split
 from torch import nn
 from torch.utils.data import DataLoader, Dataset
 from copy import deepcopy
@@ -76,6 +77,11 @@ def _resolve_group_column(df: pd.DataFrame) -> Optional[str]:
     return next((column for column in candidates if column in df.columns), None)
 
 
+def _resolve_date_column(df: pd.DataFrame) -> Optional[str]:
+    candidates = ("observation_date", "date", "acquisition_date", "capture_date")
+    return next((column for column in candidates if column in df.columns), None)
+
+
 class ParcelYellownessDataset(Dataset):
     """Return image patch, binary parcel mask, and yellowness target for regression."""
 
@@ -85,11 +91,14 @@ class ParcelYellownessDataset(Dataset):
         root_dir: Optional[Union[str, Path]] = None,
         resolution: str = "sr",
         rows: Optional[pd.DataFrame] = None,
+        band_indices: Optional[Sequence[int]] = None,
     ) -> None:
         self.inventory_path = Path(inventory_csv)
         self.root_dir = Path(root_dir) if root_dir else self.inventory_path.parent
         self.resolution = resolution.lower()
         self.inventory = rows.copy().reset_index(drop=True) if rows is not None else pd.read_csv(self.inventory_path)
+        self.band_indices = tuple(int(index) for index in band_indices) if band_indices is not None else None
+        self.date_col = _resolve_date_column(self.inventory)
 
         image_options = {
             "lr": ("lr_patch", "lr_image_path", "lr_image", "lr_patch_path"),
@@ -119,6 +128,8 @@ class ParcelYellownessDataset(Dataset):
 
         with rasterio.open(image_path) as src:
             image = _normalize_image(_align_s2_band_order(src.read(), src.descriptions))
+        if self.band_indices is not None:
+            image = image[list(self.band_indices), ...]
 
         with rasterio.open(mask_path) as src:
             mask = src.read(1).astype(np.float32)
@@ -129,6 +140,7 @@ class ParcelYellownessDataset(Dataset):
             "mask": torch.from_numpy(mask).unsqueeze(0),
             "target": torch.tensor(float(row["yellowness"]), dtype=torch.float32),
             "id_plot": str(row.get("id_plot", "")),
+            "observation_date": str(row.get(self.date_col, "")) if self.date_col is not None else "",
             "row_index": int(index),
         }
 
@@ -147,18 +159,55 @@ def make_group_split(
     resolution: str = "sr",
     test_size: float = 0.2,
     random_state: int = 42,
+    band_indices: Optional[Sequence[int]] = None,
 ) -> SplitDatasets:
     inventory_path = Path(inventory_csv)
     full_df = pd.read_csv(inventory_path)
     group_column = _resolve_group_column(full_df)
-    groups = full_df[group_column] if group_column else np.arange(len(full_df))
-    splitter = GroupShuffleSplit(test_size=test_size, n_splits=1, random_state=random_state)
-    train_idx, val_idx = next(splitter.split(full_df, groups=groups))
+    if group_column is None:
+        groups = np.arange(len(full_df))
+        split_labels = np.zeros(len(full_df), dtype=int)
+        train_idx, val_idx = train_test_split(
+            np.arange(len(full_df)),
+            test_size=test_size,
+            random_state=random_state,
+            shuffle=True,
+            stratify=split_labels,
+        )
+    else:
+        parcel_means = full_df.groupby(group_column)["yellowness"].mean().reset_index(name="parcel_mean_yellowness")
+        quantiles = min(5, parcel_means["parcel_mean_yellowness"].nunique())
+        if quantiles < 2:
+            parcel_means["stratum"] = 0
+        else:
+            parcel_means["stratum"] = pd.qcut(
+                parcel_means["parcel_mean_yellowness"],
+                q=quantiles,
+                labels=False,
+                duplicates="drop",
+            )
+
+        group_to_stratum = parcel_means.set_index(group_column)["stratum"].to_dict()
+        groups = full_df[group_column].astype(str)
+        group_rows = pd.DataFrame({"group": groups}).reset_index().rename(columns={"index": "row_index"})
+        group_labels = group_rows["group"].map(group_to_stratum).fillna(0).astype(int)
+
+        unique_groups = group_rows["group"].drop_duplicates().to_numpy()
+        unique_labels = pd.Series(unique_groups).map(group_to_stratum).fillna(0).astype(int).to_numpy()
+        train_groups, val_groups = train_test_split(
+            unique_groups,
+            test_size=test_size,
+            random_state=random_state,
+            shuffle=True,
+            stratify=unique_labels,
+        )
+        train_idx = full_df[full_df[group_column].astype(str).isin(train_groups)].index.to_numpy()
+        val_idx = full_df[full_df[group_column].astype(str).isin(val_groups)].index.to_numpy()
     train_rows = full_df.iloc[train_idx].reset_index(drop=True)
     val_rows = full_df.iloc[val_idx].reset_index(drop=True)
     return SplitDatasets(
-        train=ParcelYellownessDataset(inventory_csv, root_dir=root_dir, resolution=resolution, rows=train_rows),
-        val=ParcelYellownessDataset(inventory_csv, root_dir=root_dir, resolution=resolution, rows=val_rows),
+        train=ParcelYellownessDataset(inventory_csv, root_dir=root_dir, resolution=resolution, rows=train_rows, band_indices=band_indices),
+        val=ParcelYellownessDataset(inventory_csv, root_dir=root_dir, resolution=resolution, rows=val_rows, band_indices=band_indices),
         train_rows=train_rows,
         val_rows=val_rows,
     )

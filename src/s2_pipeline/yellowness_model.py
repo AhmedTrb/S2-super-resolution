@@ -32,6 +32,12 @@ def _infer_torchgeo_model_name_from_weight(weight_name: str) -> str:
         return "vit_small_patch16_224"
     if weight_name.startswith("ViTBase16_Weights."):
         return "vit_base_patch16_224"
+    if weight_name.startswith("ViTSmall14_DINOv2_Weights."):
+        return "vit_small_patch14_dinov2"
+    if weight_name.startswith("ViTBase14_DINOv2_Weights."):
+        return "vit_base_patch14_dinov2"
+    if weight_name.startswith("Swin_V2_T_Weights."):
+        return "swin_v2_t"
     if weight_name.startswith("FGMAEEarthLoc_Weights."):
         if "RESNET50" in weight_name.upper():
             return "resnet50"
@@ -250,12 +256,14 @@ class MaskedYellownessRegressor(nn.Module):
         dropout: float = 0.2,
         output_range: Tuple[float, float] = (0.0, 100.0),
         backbone_kwargs: Optional[Dict[str, Any]] = None,
+        backbone_band_indices: Optional[Sequence[int]] = None,
     ) -> None:
         super().__init__()
         self.image_channels = image_channels
         self.mask_fusion = MaskFusionMode(mask_fusion)
         self.output_range = output_range
         self.mask_encoder = MaskFeatureEncoder()
+        self.backbone_band_indices = tuple(int(index) for index in backbone_band_indices) if backbone_band_indices is not None else None
 
         backbone_kwargs = backbone_kwargs or {}
         fused_channels = self._fused_input_channels(image_channels, self.mask_fusion)
@@ -320,6 +328,9 @@ class MaskedYellownessRegressor(nn.Module):
         image: torch.Tensor,
         mask: torch.Tensor,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
+        if self.backbone_band_indices is not None:
+            image = image[:, list(self.backbone_band_indices), ...]
+
         if mask.ndim == 3:
             mask = mask.unsqueeze(1)
         mask = mask.to(dtype=image.dtype)
