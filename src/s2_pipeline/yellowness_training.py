@@ -202,10 +202,19 @@ class ParcelYellownessDataset(Dataset):
             raise FileNotFoundError(f"Shapefile not found for mask generation: {self.shapefile_path}")
 
         self._parcels_gdf = gpd.read_file(self.shapefile_path)
-        id_candidates = ("id_plot", "ID_PARCEL", "PARCEL_ID", "parcel_id")
+        # Prefer the authoritative parcel identifier first.
+        id_candidates = ("ID_PARCEL", "id_plot", "PARCEL_ID", "parcel_id")
         self._parcel_id_column = next((column for column in id_candidates if column in self._parcels_gdf.columns), None)
         if self._parcel_id_column is None:
             raise ValueError("Could not find a parcel identifier column in shapefile. Expected one of: id_plot, ID_PARCEL, PARCEL_ID.")
+
+    def _row_parcel_keys(self, row: pd.Series) -> list[str]:
+        keys: list[str] = []
+        for column in ("ID_PARCEL", "id_plot", "parcel_ref_id", "parcel_index"):
+            if column not in row.index:
+                continue
+            keys.extend(self._parcel_key_candidates(row.get(column)))
+        return list(dict.fromkeys(keys))
 
     def _parcel_lookup_for_crs(self, target_crs: Any) -> dict[str, Any]:
         self._ensure_parcels_loaded()
@@ -233,7 +242,7 @@ class ParcelYellownessDataset(Dataset):
 
     def _build_mask_from_shapefile(self, row: pd.Series, image_src: Any) -> np.ndarray:
         lookup = self._parcel_lookup_for_crs(image_src.crs)
-        for key in self._parcel_key_candidates(row.get("id_plot", "")):
+        for key in self._row_parcel_keys(row):
             geometry = lookup.get(key)
             if geometry is None:
                 continue
@@ -248,7 +257,7 @@ class ParcelYellownessDataset(Dataset):
 
         raise FileNotFoundError(
             "Mask file is missing and corresponding parcel geometry could not be found in shapefile "
-            f"{self.shapefile_path} for id_plot={row.get('id_plot')}"
+            f"{self.shapefile_path} for row keys={self._row_parcel_keys(row)}"
         )
 
     def __len__(self) -> int:
