@@ -7,6 +7,7 @@ from typing import Any, Dict, Iterable, Optional, Sequence, Tuple, Union
 import numpy as np
 import pandas as pd
 import rasterio
+from rasterio.features import rasterize
 import torch
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.model_selection import GroupShuffleSplit
@@ -14,6 +15,10 @@ from sklearn.model_selection import train_test_split
 from torch import nn
 from torch.utils.data import DataLoader, Dataset
 from copy import deepcopy
+
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_PARCELS_SHP = REPO_ROOT / "data" / "shapefiles" / "2020_SEPIM.shp"
 
 
 EXPECTED_S2_BAND_ORDER: tuple[str, ...] = (
@@ -106,6 +111,7 @@ class ParcelYellownessDataset(Dataset):
         resolution: str = "sr",
         rows: Optional[pd.DataFrame] = None,
         band_indices: Optional[Sequence[int]] = None,
+        shapefile_path: Optional[Union[str, Path]] = None,
     ) -> None:
         self.inventory_path = Path(inventory_csv)
         self.root_dir = Path(root_dir) if root_dir else self.inventory_path.parent
@@ -113,6 +119,10 @@ class ParcelYellownessDataset(Dataset):
         self.inventory = rows.copy().reset_index(drop=True) if rows is not None else pd.read_csv(self.inventory_path)
         self.band_indices = tuple(int(index) for index in band_indices) if band_indices is not None else None
         self.date_col = _resolve_date_column(self.inventory)
+        self.shapefile_path = Path(shapefile_path) if shapefile_path else DEFAULT_PARCELS_SHP
+        self._parcels_gdf: Any = None
+        self._parcel_lookup_by_crs: dict[str, dict[str, Any]] = {}
+        self._parcel_id_column: Optional[str] = None
 
         self.image_col, self.mask_col = _resolve_path_columns(self.inventory, self.resolution)
         if self.image_col is None or self.mask_col is None:
@@ -123,21 +133,142 @@ class ParcelYellownessDataset(Dataset):
         if "yellowness" not in self.inventory.columns:
             raise ValueError("Inventory must include a 'yellowness' column.")
 
+    @staticmethod
+    def _parcel_key_candidates(value: Any) -> list[str]:
+        candidates: list[str] = []
+        text = str(value).strip()
+        if not text or text.lower() == "nan":
+            return candidates
+
+        candidates.append(text)
+        try:
+            as_float = float(text)
+            if as_float.is_integer():
+                candidates.append(str(int(as_float)))
+        except Exception:
+            pass
+        return list(dict.fromkeys(candidates))
+
+    def _candidate_paths(self, raw_path: Any) -> list[Path]:
+        text = str(raw_path).strip()
+        if not text or text.lower() == "nan":
+            return []
+
+        normalized = text.replace("\\", "/")
+        stripped = normalized.lstrip("./")
+        basename = Path(stripped).name
+
+        paths: list[Path] = []
+        raw = Path(text)
+        if raw.is_absolute():
+            paths.append(raw)
+        paths.extend(
+            [
+                self.root_dir / text,
+                self.root_dir / normalized,
+                self.root_dir / stripped,
+                self.root_dir / basename,
+            ]
+        )
+
+        deduped: list[Path] = []
+        seen: set[str] = set()
+        for path in paths:
+            key = str(path)
+            if key not in seen:
+                deduped.append(path)
+                seen.add(key)
+        return deduped
+
+    def _resolve_existing_path(self, raw_path: Any, kind: str) -> Path:
+        candidates = self._candidate_paths(raw_path)
+        for path in candidates:
+            if path.exists():
+                return path
+        if candidates:
+            raise FileNotFoundError(f"{kind} file not found. Tried: {candidates[0]} (and {len(candidates)-1} alternatives)")
+        raise FileNotFoundError(f"{kind} file path is empty in inventory.")
+
+    def _ensure_parcels_loaded(self) -> None:
+        if self._parcels_gdf is not None:
+            return
+
+        try:
+            import geopandas as gpd
+        except Exception as exc:
+            raise ImportError("geopandas is required to generate masks from shapefile when mask files are missing.") from exc
+
+        if not self.shapefile_path.exists():
+            raise FileNotFoundError(f"Shapefile not found for mask generation: {self.shapefile_path}")
+
+        self._parcels_gdf = gpd.read_file(self.shapefile_path)
+        id_candidates = ("id_plot", "ID_PARCEL", "PARCEL_ID", "parcel_id")
+        self._parcel_id_column = next((column for column in id_candidates if column in self._parcels_gdf.columns), None)
+        if self._parcel_id_column is None:
+            raise ValueError("Could not find a parcel identifier column in shapefile. Expected one of: id_plot, ID_PARCEL, PARCEL_ID.")
+
+    def _parcel_lookup_for_crs(self, target_crs: Any) -> dict[str, Any]:
+        self._ensure_parcels_loaded()
+        assert self._parcels_gdf is not None
+        assert self._parcel_id_column is not None
+
+        crs_key = str(target_crs) if target_crs is not None else "none"
+        if crs_key in self._parcel_lookup_by_crs:
+            return self._parcel_lookup_by_crs[crs_key]
+
+        parcels = self._parcels_gdf
+        if target_crs is not None and getattr(parcels, "crs", None) is not None and parcels.crs != target_crs:
+            parcels = parcels.to_crs(target_crs)
+
+        lookup: dict[str, Any] = {}
+        for _, row in parcels.iterrows():
+            geometry = row.get("geometry")
+            if geometry is None or getattr(geometry, "is_empty", True):
+                continue
+            for key in self._parcel_key_candidates(row.get(self._parcel_id_column)):
+                lookup[key] = geometry
+
+        self._parcel_lookup_by_crs[crs_key] = lookup
+        return lookup
+
+    def _build_mask_from_shapefile(self, row: pd.Series, image_src: Any) -> np.ndarray:
+        lookup = self._parcel_lookup_for_crs(image_src.crs)
+        for key in self._parcel_key_candidates(row.get("id_plot", "")):
+            geometry = lookup.get(key)
+            if geometry is None:
+                continue
+            mask = rasterize(
+                [(geometry, 1)],
+                out_shape=(image_src.height, image_src.width),
+                transform=image_src.transform,
+                fill=0,
+                dtype=np.uint8,
+            )
+            return mask.astype(np.float32)
+
+        raise FileNotFoundError(
+            "Mask file is missing and corresponding parcel geometry could not be found in shapefile "
+            f"{self.shapefile_path} for id_plot={row.get('id_plot')}"
+        )
+
     def __len__(self) -> int:
         return len(self.inventory)
 
     def __getitem__(self, index: int) -> Dict[str, Any]:
         row = self.inventory.iloc[index]
-        image_path = self.root_dir / str(row[self.image_col])
-        mask_path = self.root_dir / str(row[self.mask_col])
+        image_path = self._resolve_existing_path(row[self.image_col], kind="image")
 
         with rasterio.open(image_path) as src:
             image = _normalize_image(_align_s2_band_order(src.read(), src.descriptions))
+            try:
+                mask_path = self._resolve_existing_path(row[self.mask_col], kind="mask")
+            except FileNotFoundError:
+                mask = self._build_mask_from_shapefile(row, src)
+            else:
+                with rasterio.open(mask_path) as mask_src:
+                    mask = mask_src.read(1).astype(np.float32)
         if self.band_indices is not None:
             image = image[list(self.band_indices), ...]
-
-        with rasterio.open(mask_path) as src:
-            mask = src.read(1).astype(np.float32)
         mask = (mask > 0).astype(np.float32)
 
         return {
@@ -165,6 +296,7 @@ def make_group_split(
     test_size: float = 0.2,
     random_state: int = 42,
     band_indices: Optional[Sequence[int]] = None,
+    shapefile_path: Optional[Union[str, Path]] = None,
 ) -> SplitDatasets:
     inventory_path = Path(inventory_csv)
     full_df = pd.read_csv(inventory_path)
@@ -211,8 +343,22 @@ def make_group_split(
     train_rows = full_df.iloc[train_idx].reset_index(drop=True)
     val_rows = full_df.iloc[val_idx].reset_index(drop=True)
     return SplitDatasets(
-        train=ParcelYellownessDataset(inventory_csv, root_dir=root_dir, resolution=resolution, rows=train_rows, band_indices=band_indices),
-        val=ParcelYellownessDataset(inventory_csv, root_dir=root_dir, resolution=resolution, rows=val_rows, band_indices=band_indices),
+        train=ParcelYellownessDataset(
+            inventory_csv,
+            root_dir=root_dir,
+            resolution=resolution,
+            rows=train_rows,
+            band_indices=band_indices,
+            shapefile_path=shapefile_path,
+        ),
+        val=ParcelYellownessDataset(
+            inventory_csv,
+            root_dir=root_dir,
+            resolution=resolution,
+            rows=val_rows,
+            band_indices=band_indices,
+            shapefile_path=shapefile_path,
+        ),
         train_rows=train_rows,
         val_rows=val_rows,
     )
