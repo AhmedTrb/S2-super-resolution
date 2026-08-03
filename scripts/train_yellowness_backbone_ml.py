@@ -16,7 +16,7 @@ from sklearn.base import BaseEstimator, RegressorMixin
 from sklearn.compose import TransformedTargetRegressor
 from sklearn.cross_decomposition import PLSRegression
 from sklearn.ensemble import ExtraTreesRegressor, RandomForestRegressor
-from sklearn.linear_model import ElasticNetCV, RidgeCV
+from sklearn.linear_model import RidgeCV
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.decomposition import PCA
 from sklearn.pipeline import Pipeline
@@ -33,7 +33,6 @@ from src.s2_pipeline.yellowness_training import make_dataloader, make_group_spli
 
 ALL_REGRESSORS: tuple[str, ...] = (
     "ridge",
-    "elastic_net",
     "pls",
     "random_forest",
     "extra_trees",
@@ -169,26 +168,6 @@ def build_regressor(name: str, random_state: int) -> Any:
                 steps=[
                     ("scale", StandardScaler()),
                     ("ridge", RidgeCV(alphas=np.logspace(-3, 3, 13))),
-                ]
-            )
-        )
-
-    if name == "elastic_net":
-        return TransformedTargetRegressor(
-            regressor=Pipeline(
-                steps=[
-                    ("scale", StandardScaler()),
-                    (
-                        "elastic_net",
-                        ElasticNetCV(
-                            alphas=np.logspace(-4, 1, 16),
-                            l1_ratio=[0.1, 0.3, 0.5, 0.7, 0.9],
-                            cv=5,
-                            n_jobs=-1,
-                            random_state=random_state,
-                            max_iter=100000,
-                        ),
-                    ),
                 ]
             )
         )
