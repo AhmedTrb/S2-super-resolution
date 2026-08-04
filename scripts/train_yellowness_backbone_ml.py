@@ -264,7 +264,26 @@ def extract_features(
         for batch in dataloader:
             image = batch["image"].to(device, non_blocking=device.type == "cuda").contiguous()
             mask = batch["mask"].to(device, non_blocking=device.type == "cuda").contiguous()
-            features = model(image, mask).cpu().numpy()
+            try:
+                features = model(image, mask).cpu().numpy()
+            except RuntimeError as exc:
+                is_cuda_alignment_error = (
+                    device.type == "cuda"
+                    and (
+                        "misaligned address" in str(exc).lower()
+                        or "cuda error" in str(exc).lower()
+                        or "acceleratorerror" in str(type(exc)).lower()
+                    )
+                )
+                if not is_cuda_alignment_error:
+                    raise
+
+                # Fallback for unstable CUDA kernels: run each patch independently.
+                single_features: list[np.ndarray] = []
+                for i in range(image.shape[0]):
+                    feat_i = model(image[i : i + 1], mask[i : i + 1]).cpu().numpy()
+                    single_features.append(feat_i)
+                features = np.concatenate(single_features, axis=0)
             targets = batch["target"].cpu().numpy()
             feature_batches.append(features)
             target_batches.append(targets)
@@ -560,7 +579,8 @@ def main() -> None:
 
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         if device.type == "cuda":
-            torch.backends.cudnn.benchmark = True
+            # Favor stability over autotuned kernels for feature extraction.
+            torch.backends.cudnn.benchmark = False
         backbone_name = resolve_backbone(args.backbone, args.torchgeo_weight)
         backbone_image_channels = len(backbone_band_indices) if backbone_band_indices is not None else 10
         model = build_yellowness_model(
