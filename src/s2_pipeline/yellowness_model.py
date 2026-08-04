@@ -88,7 +88,12 @@ class TorchGeoBackboneAdapter(nn.Module):
         super().__init__()
         self.spec = spec
         self.model = self._build_model(spec, torchgeo_weight=torchgeo_weight, **kwargs)
-        self.input_channels = getattr(self.model, "in_chans", getattr(self.model, "in_channels", spec.in_channels))
+        inferred_input_channels = self._infer_model_input_channels()
+        self.input_channels = int(
+            inferred_input_channels
+            if inferred_input_channels is not None
+            else getattr(self.model, "in_chans", getattr(self.model, "in_channels", spec.in_channels))
+        )
         self.input_adapter = self._build_input_adapter(spec.in_channels)
         self.resize_size = self._infer_model_input_size()
 
