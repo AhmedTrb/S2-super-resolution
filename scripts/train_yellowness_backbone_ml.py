@@ -45,6 +45,14 @@ ALL_DR_METHODS: tuple[str, ...] = (
     "pls",
 )
 
+ALL_POOLING_MODES: tuple[str, ...] = (
+    "global_avg",
+    "masked_avg",
+    "masked_mean_std",
+    "global_max",
+    "gem",
+)
+
 
 class SafePLSRegressor(BaseEstimator, RegressorMixin):
     """PLS regressor that caps n_components to the valid bound for the current fit data."""
@@ -120,6 +128,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--backbone", default="auto")
     parser.add_argument("--torchgeo-weight", default=None)
     parser.add_argument("--mask-fusion", default="feature_mask_pool")
+    parser.add_argument("--pooling", default="global_avg", choices=ALL_POOLING_MODES)
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--center-crop-size", type=int, default=224)
@@ -153,6 +162,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-save-feature-csv", dest="save_feature_csv", action="store_false")
     parser.add_argument("--reuse-cached-features", action="store_true")
     parser.add_argument("--feature-csv-name", default="backbone_embeddings.csv")
+    parser.add_argument("--extract-only", action="store_true")
     parser.add_argument("--deep-runs-root", type=Path, default=Path("outputs") / "yellowness_regression")
     parser.add_argument("--export-deep-runs-summary", dest="export_deep_runs_summary", action="store_true")
     parser.add_argument("--no-export-deep-runs-summary", dest="export_deep_runs_summary", action="store_false")
@@ -316,10 +326,18 @@ def _save_embeddings_csv(
     val_observation_dates: list[str],
     val_row_indices: list[int],
     backbone_name: str,
+    resolution: str,
+    mask_fusion: str,
+    pooling: str,
+    torchgeo_weight: Optional[str],
 ) -> None:
     feature_columns = [f"feat_{i:04d}" for i in range(train_features.shape[1])]
 
     train_df = pd.DataFrame(train_features, columns=feature_columns)
+    train_df.insert(0, "pooling", pooling)
+    train_df.insert(0, "mask_fusion", mask_fusion)
+    train_df.insert(0, "resolution", resolution)
+    train_df.insert(0, "torchgeo_weight", torchgeo_weight or "")
     train_df.insert(0, "row_index", train_row_indices)
     train_df.insert(0, "observation_date", train_observation_dates)
     train_df.insert(0, "id_plot", train_plot_ids)
@@ -328,6 +346,10 @@ def _save_embeddings_csv(
     train_df["yellowness"] = y_train
 
     val_df = pd.DataFrame(val_features, columns=feature_columns)
+    val_df.insert(0, "pooling", pooling)
+    val_df.insert(0, "mask_fusion", mask_fusion)
+    val_df.insert(0, "resolution", resolution)
+    val_df.insert(0, "torchgeo_weight", torchgeo_weight or "")
     val_df.insert(0, "row_index", val_row_indices)
     val_df.insert(0, "observation_date", val_observation_dates)
     val_df.insert(0, "id_plot", val_plot_ids)
@@ -344,6 +366,10 @@ def _save_embeddings_csv(
         id_plot=combined["id_plot"].to_numpy(dtype=str),
         observation_date=combined["observation_date"].to_numpy(dtype=str),
         backbone_name=combined["backbone_name"].to_numpy(dtype=str),
+        resolution=combined["resolution"].to_numpy(dtype=str),
+        mask_fusion=combined["mask_fusion"].to_numpy(dtype=str),
+        pooling=combined["pooling"].to_numpy(dtype=str),
+        torchgeo_weight=combined["torchgeo_weight"].to_numpy(dtype=str),
         yellowness=combined["yellowness"].to_numpy(dtype=np.float32),
         row_index=combined["row_index"].to_numpy(dtype=np.int64),
     )
@@ -528,6 +554,7 @@ def main() -> None:
         model = build_yellowness_model(
             backbone_name=backbone_name,
             mask_fusion=args.mask_fusion,
+            pooling_mode=args.pooling,
             torchgeo_weight=args.torchgeo_weight,
             freeze_backbone=True,
             image_channels=backbone_image_channels,
@@ -553,7 +580,25 @@ def main() -> None:
                 val_observation_dates=val_observation_dates,
                 val_row_indices=val_row_indices,
                 backbone_name=backbone_name,
+                resolution=args.resolution,
+                mask_fusion=args.mask_fusion,
+                pooling=args.pooling,
+                torchgeo_weight=args.torchgeo_weight,
             )
+
+    feature_config = {
+        "backbone": backbone_name,
+        "torchgeo_weight": args.torchgeo_weight,
+        "mask_fusion": args.mask_fusion,
+        "pooling": args.pooling,
+        "resolution": args.resolution,
+        "raw_feature_dim": int(train_features.shape[1]),
+        "num_train": int(train_features.shape[0]),
+        "num_val": int(val_features.shape[0]),
+        "feature_csv": str(feature_csv_path if feature_csv_path.exists() else ""),
+    }
+    with (args.output_dir / "feature_config.json").open("w", encoding="utf-8") as fh:
+        json.dump(feature_config, fh, indent=2)
 
     np.savez_compressed(
         args.output_dir / "backbone_features.npz",
@@ -562,6 +607,10 @@ def main() -> None:
         X_val=val_features,
         y_val=y_val,
     )
+
+    if args.extract_only:
+        print(f"Saved features only: {feature_csv_path}")
+        return
 
     dr_sweep_rows: list[dict[str, Any]] = []
     summary_rows: list[dict[str, Any]] = []
