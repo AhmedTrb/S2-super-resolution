@@ -117,8 +117,9 @@ def resolve_backbone_band_indices(weight_name: Optional[str]) -> Optional[list[i
         "Swin_V2_B_Weights.SENTINEL2_MI_MS_SATLAS",
     )
     if weight_name.startswith(satlas_9band_prefixes):
-        # SATLAS Sentinel-2 weights were trained without B8A (9-band input).
-        return [0, 1, 2, 3, 4, 5, 6, 8, 9]
+        # SATLAS Sentinel-2 weights expect the 9-band order:
+        # [B04, B03, B02, B05, B06, B07, B08, B11, B12].
+        return [0, 1, 2, 3, 4, 5, 6, 7, 8]
     return None
 
 
