@@ -30,6 +30,8 @@ def infer_torchgeo_backbone_from_weight(weight_name: str) -> str:
         return "torchgeo:vit_base_patch14_dinov2"
     if weight_name.startswith("Swin_V2_T_Weights."):
         return "torchgeo:swin_v2_t"
+    if weight_name.startswith("Swin_V2_B_Weights."):
+        return "torchgeo:swin_v2_b"
     if weight_name.startswith("FGMAEEarthLoc_Weights.") and "RESNET50" in weight_name.upper():
         return "torchgeo:resnet50"
     raise ValueError("Could not infer a TorchGeo backbone from --torchgeo-weight.")
@@ -46,9 +48,17 @@ def resolve_backbone(backbone: str, torchgeo_weight: Optional[str]) -> str:
 def resolve_backbone_band_indices(weight_name: Optional[str]) -> Optional[list[int]]:
     if not weight_name:
         return None
-    if weight_name.startswith("ResNet50_Weights.SENTINEL2_MI_MS_SATLAS"):
-        return [0, 1, 2, 3, 4, 5, 6, 8, 9]
-    if weight_name.startswith("Swin_V2_T_Weights.SENTINEL2_MI_MS_SATLAS"):
+
+    satlas_9band_prefixes = (
+        "ResNet50_Weights.SENTINEL2_SI_MS_SATLAS",
+        "ResNet50_Weights.SENTINEL2_MI_MS_SATLAS",
+        "Swin_V2_T_Weights.SENTINEL2_SI_MS_SATLAS",
+        "Swin_V2_T_Weights.SENTINEL2_MI_MS_SATLAS",
+        "Swin_V2_B_Weights.SENTINEL2_SI_MS_SATLAS",
+        "Swin_V2_B_Weights.SENTINEL2_MI_MS_SATLAS",
+    )
+    if weight_name.startswith(satlas_9band_prefixes):
+        # SATLAS Sentinel-2 weights were trained without B8A (9-band input).
         return [0, 1, 2, 3, 4, 5, 6, 8, 9]
     return None
 
