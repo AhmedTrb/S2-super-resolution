@@ -78,7 +78,8 @@ def _normalize_image(image: np.ndarray) -> np.ndarray:
 
 
 def _resolve_group_column(df: pd.DataFrame) -> Optional[str]:
-    candidates = ("id_plot", "parcel_ref_id", "parcel_index")
+    # Prefer parcel identifiers for group-wise split to avoid parcel leakage.
+    candidates = ("PARCEL_ID", "ID_PARCEL", "parcel_id", "id_plot", "parcel_ref_id", "parcel_index")
     return next((column for column in candidates if column in df.columns), None)
 
 
@@ -310,6 +311,8 @@ def make_group_split(
     inventory_path = Path(inventory_csv)
     full_df = pd.read_csv(inventory_path)
     group_column = _resolve_group_column(full_df)
+    if group_column is not None:
+        print(f"Using group split column: {group_column}")
     if group_column is None:
         groups = np.arange(len(full_df))
         split_labels = np.zeros(len(full_df), dtype=int)

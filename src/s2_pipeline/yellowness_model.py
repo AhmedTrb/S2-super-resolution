@@ -15,6 +15,15 @@ class MaskFusionMode(str, Enum):
     IMAGE_AND_MASK = "image_and_mask"
     LATE_MASK = "late_mask"
     FEATURE_MASK_POOL = "feature_mask_pool"
+    CROP_MASK_BBOX = "crop_mask_bbox"
+
+
+class PoolingMode(str, Enum):
+    GLOBAL_AVG = "global_avg"
+    MASKED_AVG = "masked_avg"
+    MASKED_MEAN_STD = "masked_mean_std"
+    GLOBAL_MAX = "global_max"
+    GEM = "gem"
 
 
 @dataclass(frozen=True)
@@ -248,6 +257,7 @@ class MaskedYellownessRegressor(nn.Module):
         backbone_name: str = "simple_cnn",
         image_channels: int = 10,
         mask_fusion: MaskFusionMode = MaskFusionMode.FEATURE_MASK_POOL,
+        pooling_mode: PoolingMode = PoolingMode.GLOBAL_AVG,
         torchgeo_weight: Optional[str] = None,
         pretrained: bool = True,
         freeze_backbone: bool = False,
@@ -261,9 +271,11 @@ class MaskedYellownessRegressor(nn.Module):
         super().__init__()
         self.image_channels = image_channels
         self.mask_fusion = MaskFusionMode(mask_fusion)
+        self.pooling_mode = PoolingMode(pooling_mode)
         self.output_range = output_range
         self.mask_encoder = MaskFeatureEncoder()
         self.backbone_band_indices = tuple(int(index) for index in backbone_band_indices) if backbone_band_indices is not None else None
+        self.gem_p = nn.Parameter(torch.tensor(3.0), requires_grad=False)
 
         backbone_kwargs = backbone_kwargs or {}
         fused_channels = self._fused_input_channels(image_channels, self.mask_fusion)
@@ -315,7 +327,13 @@ class MaskedYellownessRegressor(nn.Module):
 
     @staticmethod
     def _fused_input_channels(image_channels: int, mode: MaskFusionMode) -> int:
-        if mode in {MaskFusionMode.IMAGE_ONLY, MaskFusionMode.MASKED_IMAGE, MaskFusionMode.LATE_MASK, MaskFusionMode.FEATURE_MASK_POOL}:
+        if mode in {
+            MaskFusionMode.IMAGE_ONLY,
+            MaskFusionMode.MASKED_IMAGE,
+            MaskFusionMode.LATE_MASK,
+            MaskFusionMode.FEATURE_MASK_POOL,
+            MaskFusionMode.CROP_MASK_BBOX,
+        }:
             return image_channels
         if mode == MaskFusionMode.MASK_AS_CHANNEL:
             return image_channels + 1
@@ -323,17 +341,47 @@ class MaskedYellownessRegressor(nn.Module):
             return (image_channels * 2) + 1
         raise ValueError(f"Unsupported mask fusion mode: {mode}")
 
+    @staticmethod
+    def _crop_to_mask_bbox(image: torch.Tensor, mask: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        height, width = image.shape[-2:]
+        cropped_images: list[torch.Tensor] = []
+        cropped_masks: list[torch.Tensor] = []
+
+        for index in range(image.shape[0]):
+            sample_image = image[index : index + 1]
+            sample_mask = mask[index : index + 1]
+            positive = torch.nonzero(sample_mask[0, 0] > 0.5, as_tuple=False)
+            if positive.numel() == 0:
+                cropped_images.append(sample_image)
+                cropped_masks.append(sample_mask)
+                continue
+
+            y_min = int(positive[:, 0].min().item())
+            y_max = int(positive[:, 0].max().item()) + 1
+            x_min = int(positive[:, 1].min().item())
+            x_max = int(positive[:, 1].max().item()) + 1
+
+            sample_image = sample_image[..., y_min:y_max, x_min:x_max]
+            sample_mask = sample_mask[..., y_min:y_max, x_min:x_max]
+            sample_image = nn.functional.interpolate(sample_image, size=(height, width), mode="bilinear", align_corners=False)
+            sample_mask = nn.functional.interpolate(sample_mask, size=(height, width), mode="nearest")
+            cropped_images.append(sample_image)
+            cropped_masks.append(sample_mask)
+
+        return torch.cat(cropped_images, dim=0), torch.cat(cropped_masks, dim=0)
+
     def _prepare_backbone_input(
         self,
         image: torch.Tensor,
         mask: torch.Tensor,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor]]:
         if self.backbone_band_indices is not None:
             image = image[:, list(self.backbone_band_indices), ...]
 
         if mask.ndim == 3:
             mask = mask.unsqueeze(1)
         mask = mask.to(dtype=image.dtype)
+        pooling_mask: Optional[torch.Tensor] = mask
 
         if self.mask_fusion == MaskFusionMode.IMAGE_ONLY:
             fused = image
@@ -359,10 +407,14 @@ class MaskedYellownessRegressor(nn.Module):
             fused = image
             aux = None
             feature_mask = mask
+        elif self.mask_fusion == MaskFusionMode.CROP_MASK_BBOX:
+            fused, pooling_mask = self._crop_to_mask_bbox(image, mask)
+            aux = None
+            feature_mask = None
         else:
             raise ValueError(f"Unsupported mask fusion mode: {self.mask_fusion}")
 
-        return self.input_adapter(fused), aux, feature_mask
+        return self.input_adapter(fused), aux, feature_mask, pooling_mask
 
     def _apply_feature_mask(self, features: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         if features.ndim == 4:
@@ -408,10 +460,96 @@ class MaskedYellownessRegressor(nn.Module):
                     return value
         raise TypeError("Backbone output could not be converted to a tensor feature map.")
 
-    def _pool_features(self, features: torch.Tensor) -> torch.Tensor:
+    def _mask_for_token_features(self, features: torch.Tensor, mask: torch.Tensor) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
+        num_tokens = features.shape[1]
+        spatial_tokens = features
+        cls_token: Optional[torch.Tensor] = None
+
+        side = int(round((num_tokens - 1) ** 0.5))
+        if side * side == (num_tokens - 1):
+            cls_token = features[:, :1, :]
+            spatial_tokens = features[:, 1:, :]
+        else:
+            side = int(round(num_tokens ** 0.5))
+            if side * side != num_tokens:
+                return features, None, None
+
+        resized_mask = nn.functional.interpolate(mask, size=(side, side), mode="nearest")
+        flat_mask = resized_mask.flatten(2).transpose(1, 2)
+        return spatial_tokens, flat_mask, cls_token
+
+    def _masked_reduce_4d(self, features: torch.Tensor, mask: torch.Tensor, include_std: bool = False) -> torch.Tensor:
+        resized_mask = nn.functional.interpolate(mask, size=features.shape[-2:], mode="nearest")
+        weights = resized_mask.clamp_min(0.0)
+        denom = weights.sum(dim=(2, 3), keepdim=True).clamp_min(1e-6)
+        mean = (features * weights).sum(dim=(2, 3), keepdim=True) / denom
+        mean_flat = mean.flatten(1)
+        if not include_std:
+            return mean_flat
+
+        variance = ((features - mean) ** 2 * weights).sum(dim=(2, 3), keepdim=True) / denom
+        std_flat = torch.sqrt(variance.clamp_min(1e-6)).flatten(1)
+        return torch.cat([mean_flat, std_flat], dim=1)
+
+    def _masked_reduce_tokens(self, features: torch.Tensor, mask: torch.Tensor, include_std: bool = False) -> torch.Tensor:
+        spatial_tokens, flat_mask, cls_token = self._mask_for_token_features(features, mask)
+        if flat_mask is None:
+            if include_std:
+                mean = features.mean(dim=1)
+                std = features.std(dim=1, unbiased=False)
+                return torch.cat([mean, std], dim=1)
+            return features.mean(dim=1)
+
+        weights = flat_mask.clamp_min(0.0)
+        denom = weights.sum(dim=1, keepdim=True).clamp_min(1e-6)
+        mean = (spatial_tokens * weights).sum(dim=1) / denom.squeeze(1)
+        if cls_token is not None:
+            mean = 0.5 * (mean + cls_token.squeeze(1))
+        if not include_std:
+            return mean
+
+        centered = spatial_tokens - mean.unsqueeze(1)
+        variance = (centered.pow(2) * weights).sum(dim=1) / denom.squeeze(1)
+        std = torch.sqrt(variance.clamp_min(1e-6))
+        return torch.cat([mean, std], dim=1)
+
+    def _gem_pool_4d(self, features: torch.Tensor) -> torch.Tensor:
+        p = float(self.gem_p.item())
+        pooled = nn.functional.adaptive_avg_pool2d(features.clamp_min(1e-6).pow(p), output_size=1)
+        return pooled.pow(1.0 / p).flatten(1)
+
+    def _gem_pool_tokens(self, features: torch.Tensor) -> torch.Tensor:
+        p = float(self.gem_p.item())
+        if features.shape[-1] >= features.shape[1]:
+            return features.clamp_min(1e-6).pow(p).mean(dim=1).pow(1.0 / p)
+        return features.clamp_min(1e-6).pow(p).mean(dim=-1).pow(1.0 / p)
+
+    def _pool_features(self, features: torch.Tensor, mask: Optional[torch.Tensor]) -> torch.Tensor:
+        if self.pooling_mode == PoolingMode.MASKED_AVG and mask is not None:
+            if features.ndim == 4:
+                return self._masked_reduce_4d(features, mask, include_std=False)
+            if features.ndim == 3:
+                return self._masked_reduce_tokens(features, mask, include_std=False)
+
+        if self.pooling_mode == PoolingMode.MASKED_MEAN_STD and mask is not None:
+            if features.ndim == 4:
+                return self._masked_reduce_4d(features, mask, include_std=True)
+            if features.ndim == 3:
+                return self._masked_reduce_tokens(features, mask, include_std=True)
+
         if features.ndim == 4:
+            if self.pooling_mode == PoolingMode.GLOBAL_MAX:
+                return torch.flatten(nn.functional.adaptive_max_pool2d(features, output_size=1), 1)
+            if self.pooling_mode == PoolingMode.GEM:
+                return self._gem_pool_4d(features)
             return torch.flatten(nn.functional.adaptive_avg_pool2d(features, output_size=1), 1)
         if features.ndim == 3:
+            if self.pooling_mode == PoolingMode.GLOBAL_MAX:
+                if features.shape[-1] >= features.shape[1]:
+                    return features.max(dim=1).values
+                return features.max(dim=-1).values
+            if self.pooling_mode == PoolingMode.GEM:
+                return self._gem_pool_tokens(features)
             if features.shape[-1] >= features.shape[1]:
                 return features.mean(dim=1)
             return features.mean(dim=-1)
@@ -422,12 +560,12 @@ class MaskedYellownessRegressor(nn.Module):
         return torch.flatten(features, start_dim=1)
 
     def extract_features(self, image: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-        backbone_input, aux_features, feature_mask = self._prepare_backbone_input(image, mask)
+        backbone_input, aux_features, feature_mask, pooling_mask = self._prepare_backbone_input(image, mask)
         raw_features = self.backbone(backbone_input)
         tensor_features = self._extract_tensor(raw_features)
         if feature_mask is not None:
             tensor_features = self._apply_feature_mask(tensor_features, feature_mask)
-        pooled_features = self._pool_features(tensor_features)
+        pooled_features = self._pool_features(tensor_features, pooling_mask)
         if aux_features is not None:
             pooled_features = torch.cat([pooled_features, aux_features], dim=1)
         return pooled_features
@@ -450,6 +588,7 @@ class MaskedYellownessRegressor(nn.Module):
 def build_yellowness_model(
     backbone_name: str = "simple_cnn",
     mask_fusion: str = "mask_as_channel",
+    pooling_mode: str = "global_avg",
     torchgeo_weight: Optional[str] = None,
     freeze_backbone: bool = False,
     **kwargs: Any,
@@ -457,6 +596,7 @@ def build_yellowness_model(
     return MaskedYellownessRegressor(
         backbone_name=backbone_name,
         mask_fusion=MaskFusionMode(mask_fusion),
+        pooling_mode=PoolingMode(pooling_mode),
         torchgeo_weight=torchgeo_weight,
         freeze_backbone=freeze_backbone,
         **kwargs,
