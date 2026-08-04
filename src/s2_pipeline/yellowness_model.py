@@ -47,6 +47,8 @@ def _infer_torchgeo_model_name_from_weight(weight_name: str) -> str:
         return "vit_base_patch14_dinov2"
     if weight_name.startswith("Swin_V2_T_Weights."):
         return "swin_v2_t"
+    if weight_name.startswith("Swin_V2_B_Weights."):
+        return "swin_v2_b"
     if weight_name.startswith("FGMAEEarthLoc_Weights."):
         if "RESNET50" in weight_name.upper():
             return "resnet50"
@@ -178,7 +180,10 @@ class TorchGeoBackboneAdapter(nn.Module):
             x = torch.nn.functional.interpolate(x, size=self.resize_size, mode="bilinear", align_corners=False)
         if x.shape[1] < self.input_channels:
             x = torch.nn.functional.pad(x, (0, 0, 0, 0, 0, self.input_channels - x.shape[1]))
+        elif x.shape[1] > self.input_channels:
+            x = x[:, : self.input_channels, ...]
         x = self.input_adapter(x)
+        x = x.contiguous()
         if hasattr(self.model, "forward_features"):
             return self.model.forward_features(x)
         return self.model(x)
@@ -377,10 +382,11 @@ class MaskedYellownessRegressor(nn.Module):
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor]]:
         if self.backbone_band_indices is not None:
             image = image[:, list(self.backbone_band_indices), ...]
+        image = image.contiguous()
 
         if mask.ndim == 3:
             mask = mask.unsqueeze(1)
-        mask = mask.to(dtype=image.dtype)
+        mask = mask.to(dtype=image.dtype).contiguous()
         pooling_mask: Optional[torch.Tensor] = mask
 
         if self.mask_fusion == MaskFusionMode.IMAGE_ONLY:
@@ -414,12 +420,12 @@ class MaskedYellownessRegressor(nn.Module):
         else:
             raise ValueError(f"Unsupported mask fusion mode: {self.mask_fusion}")
 
-        return self.input_adapter(fused), aux, feature_mask, pooling_mask
+        return self.input_adapter(fused).contiguous(), aux, feature_mask, pooling_mask
 
     def _apply_feature_mask(self, features: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         if features.ndim == 4:
             resized_mask = nn.functional.interpolate(mask, size=features.shape[-2:], mode="nearest")
-            return features * resized_mask
+            return (features * resized_mask).contiguous()
 
         if features.ndim == 3 and features.shape[1] >= features.shape[2]:
             num_tokens = features.shape[1]
@@ -439,8 +445,8 @@ class MaskedYellownessRegressor(nn.Module):
             flat_mask = resized_mask.flatten(2).transpose(1, 2)
             masked_tokens = spatial_tokens * flat_mask
             if cls_token is not None:
-                return torch.cat([cls_token, masked_tokens], dim=1)
-            return masked_tokens
+                return torch.cat([cls_token, masked_tokens], dim=1).contiguous()
+            return masked_tokens.contiguous()
 
         return features
 
@@ -525,6 +531,7 @@ class MaskedYellownessRegressor(nn.Module):
         return features.clamp_min(1e-6).pow(p).mean(dim=-1).pow(1.0 / p)
 
     def _pool_features(self, features: torch.Tensor, mask: Optional[torch.Tensor]) -> torch.Tensor:
+        features = features.contiguous()
         if self.pooling_mode == PoolingMode.MASKED_AVG and mask is not None:
             if features.ndim == 4:
                 return self._masked_reduce_4d(features, mask, include_std=False)

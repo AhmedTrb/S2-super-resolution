@@ -97,6 +97,8 @@ def infer_torchgeo_backbone_from_weight(weight_name: str) -> str:
         return "torchgeo:vit_base_patch14_dinov2"
     if weight_name.startswith("Swin_V2_T_Weights."):
         return "torchgeo:swin_v2_t"
+    if weight_name.startswith("Swin_V2_B_Weights."):
+        return "torchgeo:swin_v2_b"
     if weight_name.startswith("FGMAEEarthLoc_Weights.") and "RESNET50" in weight_name.upper():
         return "torchgeo:resnet50"
     raise ValueError("Could not infer a TorchGeo backbone from --torchgeo-weight.")
@@ -105,9 +107,17 @@ def infer_torchgeo_backbone_from_weight(weight_name: str) -> str:
 def resolve_backbone_band_indices(weight_name: Optional[str]) -> Optional[list[int]]:
     if not weight_name:
         return None
-    if weight_name.startswith("ResNet50_Weights.SENTINEL2_MI_MS_SATLAS"):
-        return [0, 1, 2, 3, 4, 5, 6, 8, 9]
-    if weight_name.startswith("Swin_V2_T_Weights.SENTINEL2_MI_MS_SATLAS"):
+
+    satlas_9band_prefixes = (
+        "ResNet50_Weights.SENTINEL2_SI_MS_SATLAS",
+        "ResNet50_Weights.SENTINEL2_MI_MS_SATLAS",
+        "Swin_V2_T_Weights.SENTINEL2_SI_MS_SATLAS",
+        "Swin_V2_T_Weights.SENTINEL2_MI_MS_SATLAS",
+        "Swin_V2_B_Weights.SENTINEL2_SI_MS_SATLAS",
+        "Swin_V2_B_Weights.SENTINEL2_MI_MS_SATLAS",
+    )
+    if weight_name.startswith(satlas_9band_prefixes):
+        # SATLAS Sentinel-2 weights were trained without B8A (9-band input).
         return [0, 1, 2, 3, 4, 5, 6, 8, 9]
     return None
 
@@ -131,6 +141,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pooling", default="global_avg", choices=ALL_POOLING_MODES)
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--num-workers", type=int, default=0)
+    parser.add_argument("--data-parallel", dest="data_parallel", action="store_true")
+    parser.add_argument("--no-data-parallel", dest="data_parallel", action="store_false")
     parser.add_argument("--center-crop-size", type=int, default=224)
     parser.add_argument("--test-size", type=float, default=0.2)
     parser.add_argument("--random-state", type=int, default=42)
@@ -167,7 +179,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--export-deep-runs-summary", dest="export_deep_runs_summary", action="store_true")
     parser.add_argument("--no-export-deep-runs-summary", dest="export_deep_runs_summary", action="store_false")
     parser.add_argument("--output-dir", type=Path, default=Path("outputs") / "yellowness_backbone_ml")
-    parser.set_defaults(save_feature_csv=True, export_deep_runs_summary=True)
+    parser.set_defaults(save_feature_csv=True, export_deep_runs_summary=True, data_parallel=False)
     return parser.parse_args()
 
 
@@ -230,9 +242,9 @@ def build_regressor(name: str, random_state: int) -> Any:
     raise ValueError(f"Unsupported regressor '{name}'.")
 
 
-def build_feature_extractor(model: nn.Module, device: torch.device) -> nn.Module:
+def build_feature_extractor(model: nn.Module, device: torch.device, use_data_parallel: bool = False) -> nn.Module:
     extractor: nn.Module = BackboneFeatureExtractor(model)
-    if device.type == "cuda" and torch.cuda.device_count() > 1:
+    if use_data_parallel and device.type == "cuda" and torch.cuda.device_count() > 1:
         extractor = nn.DataParallel(extractor)
     return extractor.to(device)
 
@@ -250,8 +262,8 @@ def extract_features(
     row_indices: list[int] = []
     with torch.inference_mode():
         for batch in dataloader:
-            image = batch["image"].to(device, non_blocking=device.type == "cuda")
-            mask = batch["mask"].to(device, non_blocking=device.type == "cuda")
+            image = batch["image"].to(device, non_blocking=device.type == "cuda").contiguous()
+            mask = batch["mask"].to(device, non_blocking=device.type == "cuda").contiguous()
             features = model(image, mask).cpu().numpy()
             targets = batch["target"].cpu().numpy()
             feature_batches.append(features)
@@ -561,7 +573,7 @@ def main() -> None:
             sample_patch_size=args.center_crop_size,
             backbone_band_indices=backbone_band_indices,
         )
-        feature_extractor = build_feature_extractor(model, device)
+        feature_extractor = build_feature_extractor(model, device, use_data_parallel=args.data_parallel)
 
         train_features, y_train, train_plot_ids, train_observation_dates, train_row_indices = extract_features(feature_extractor, train_loader, device)
         val_features, y_val, val_plot_ids, val_observation_dates, val_row_indices = extract_features(feature_extractor, val_loader, device)
