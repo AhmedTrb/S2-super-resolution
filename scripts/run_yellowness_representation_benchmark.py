@@ -510,13 +510,21 @@ def main() -> None:
                     artifact_dir = args.output_dir / run.run_name / representation_name / resolved_label / regressor_name
                     artifact_dir.mkdir(parents=True, exist_ok=True)
 
+                    x_train_input: Any = x_train
+                    x_val_input: Any = x_val
+                    # Keep feature names stable for LightGBM to avoid sklearn feature-name warnings.
+                    if regressor_name == "lightgbm":
+                        feature_labels = [f"f_{idx}" for idx in range(x_train.shape[1])]
+                        x_train_input = pd.DataFrame(x_train, columns=feature_labels)
+                        x_val_input = pd.DataFrame(x_val, columns=feature_labels)
+
                     fit_kwargs: dict[str, Any] = {}
                     if regressor_name == "xgboost":
-                        fit_kwargs = {"eval_set": [(x_val, y_val)], "verbose": False}
-                    regressor.fit(x_train, y_train, **fit_kwargs)
+                        fit_kwargs = {"eval_set": [(x_val_input, y_val)], "verbose": False}
+                    regressor.fit(x_train_input, y_train, **fit_kwargs)
 
-                    train_pred = np.asarray(regressor.predict(x_train)).reshape(-1)
-                    val_pred = np.asarray(regressor.predict(x_val)).reshape(-1)
+                    train_pred = np.asarray(regressor.predict(x_train_input)).reshape(-1)
+                    val_pred = np.asarray(regressor.predict(x_val_input)).reshape(-1)
                     train_metrics = metric_dict(y_train, train_pred)
                     val_metrics = metric_dict(y_val, val_pred)
 
