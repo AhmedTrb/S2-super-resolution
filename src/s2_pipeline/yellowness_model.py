@@ -37,6 +37,8 @@ class BackboneSpec:
 def _infer_torchgeo_model_name_from_weight(weight_name: str) -> str:
     if weight_name.startswith("ResNet50_Weights."):
         return "resnet50"
+    if weight_name.startswith("ResNet152_Weights."):
+        return "resnet152"
     if weight_name.startswith("ViTSmall16_Weights."):
         return "vit_small_patch16_224"
     if weight_name.startswith("ViTBase16_Weights."):
@@ -581,6 +583,26 @@ class MaskedYellownessRegressor(nn.Module):
         if aux_features is not None:
             pooled_features = torch.cat([pooled_features, aux_features], dim=1)
         return pooled_features
+
+    def debug_feature_shapes(self, image: torch.Tensor, mask: torch.Tensor) -> Dict[str, Any]:
+        """Return key tensor shapes for debugging feature extraction and reduction."""
+        with torch.no_grad():
+            backbone_input, aux_features, feature_mask, pooling_mask = self._prepare_backbone_input(image, mask)
+            raw_features = self.backbone(backbone_input)
+            tensor_features = self._extract_tensor(raw_features)
+            masked_features = self._apply_feature_mask(tensor_features, feature_mask) if feature_mask is not None else tensor_features
+            pooled_features = self._pool_features(masked_features, pooling_mask)
+            final_features = torch.cat([pooled_features, aux_features], dim=1) if aux_features is not None else pooled_features
+
+        return {
+            "image_shape": tuple(image.shape),
+            "mask_shape": tuple(mask.shape),
+            "backbone_input_shape": tuple(backbone_input.shape),
+            "raw_backbone_shape": tuple(tensor_features.shape),
+            "masked_backbone_shape": tuple(masked_features.shape),
+            "pooled_shape": tuple(pooled_features.shape),
+            "final_feature_shape": tuple(final_features.shape),
+        }
 
     def _infer_feature_dim(self, sample_patch_size: int) -> int:
         with torch.no_grad():

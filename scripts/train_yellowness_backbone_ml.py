@@ -87,6 +87,8 @@ class BackboneFeatureExtractor(nn.Module):
 def infer_torchgeo_backbone_from_weight(weight_name: str) -> str:
     if weight_name.startswith("ResNet50_Weights."):
         return "torchgeo:resnet50"
+    if weight_name.startswith("ResNet152_Weights."):
+        return "torchgeo:resnet152"
     if weight_name.startswith("ViTSmall16_Weights."):
         return "torchgeo:vit_small_patch16_224"
     if weight_name.startswith("ViTBase16_Weights."):
@@ -110,6 +112,7 @@ def resolve_backbone_band_indices(weight_name: Optional[str]) -> Optional[list[i
 
     satlas_9band_prefixes = (
         "ResNet50_Weights.SENTINEL2_SI_MS_SATLAS",
+        "ResNet152_Weights.SENTINEL2_SI_MS_SATLAS",
         "ResNet50_Weights.SENTINEL2_MI_MS_SATLAS",
         "Swin_V2_T_Weights.SENTINEL2_SI_MS_SATLAS",
         "Swin_V2_T_Weights.SENTINEL2_MI_MS_SATLAS",
@@ -117,9 +120,30 @@ def resolve_backbone_band_indices(weight_name: Optional[str]) -> Optional[list[i
         "Swin_V2_B_Weights.SENTINEL2_MI_MS_SATLAS",
     )
     if weight_name.startswith(satlas_9band_prefixes):
-        # SATLAS Sentinel-2 weights expect the 9-band order:
-        # [B04, B03, B02, B05, B06, B07, B08, B11, B12].
-        return [0, 1, 2, 3, 4, 5, 6, 7, 8]
+        # Use recipe-based remapping from L2A 10-band order to SATLAS 9-band order.
+        return None
+    return None
+
+
+def resolve_band_recipe(weight_name: Optional[str]) -> Optional[str]:
+    if not weight_name:
+        return None
+
+    satlas_9band_prefixes = (
+        "ResNet50_Weights.SENTINEL2_SI_MS_SATLAS",
+        "ResNet152_Weights.SENTINEL2_SI_MS_SATLAS",
+        "ResNet50_Weights.SENTINEL2_MI_MS_SATLAS",
+        "Swin_V2_T_Weights.SENTINEL2_SI_MS_SATLAS",
+        "Swin_V2_T_Weights.SENTINEL2_MI_MS_SATLAS",
+        "Swin_V2_B_Weights.SENTINEL2_SI_MS_SATLAS",
+        "Swin_V2_B_Weights.SENTINEL2_MI_MS_SATLAS",
+    )
+    if weight_name.startswith(satlas_9band_prefixes):
+        return "satlas_l1c_9_from_l2a"
+
+    if weight_name.startswith("SENTINEL2_ALL_NDVI_SECO_ECO"):
+        return "ndvi_seco_eco_9"
+
     return None
 
 
@@ -145,6 +169,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--data-parallel", dest="data_parallel", action="store_true")
     parser.add_argument("--no-data-parallel", dest="data_parallel", action="store_false")
     parser.add_argument("--center-crop-size", type=int, default=224)
+    parser.add_argument("--shapefile-path", type=Path, default=None)
+    parser.add_argument("--mask-buffer-m", type=float, default=-20.0)
+    parser.add_argument("--feature-reduction-method", choices=("none", "pca"), default="none")
+    parser.add_argument("--feature-reduction-dim", type=int, default=64)
+    parser.add_argument("--log-feature-shapes", action="store_true")
     parser.add_argument("--test-size", type=float, default=0.2)
     parser.add_argument("--random-state", type=int, default=42)
     parser.add_argument(
@@ -261,6 +290,7 @@ def extract_features(
     plot_ids: list[str] = []
     observation_dates: list[str] = []
     row_indices: list[int] = []
+    logged_shapes = False
     with torch.inference_mode():
         for batch in dataloader:
             image = batch["image"].to(device, non_blocking=device.type == "cuda").contiguous()
@@ -285,6 +315,21 @@ def extract_features(
                     feat_i = model(image[i : i + 1], mask[i : i + 1]).cpu().numpy()
                     single_features.append(feat_i)
                 features = np.concatenate(single_features, axis=0)
+
+            if not logged_shapes:
+                core_model = model.module if isinstance(model, nn.DataParallel) else model
+                target_model = getattr(core_model, "model", core_model)
+                if hasattr(target_model, "debug_feature_shapes"):
+                    try:
+                        debug = target_model.debug_feature_shapes(image[:1], mask[:1])
+                        print("[shape-log] image:", tuple(debug.get("image_shape", ())))
+                        print("[shape-log] raw_backbone:", tuple(debug.get("raw_backbone_shape", ())))
+                        print("[shape-log] masked_backbone:", tuple(debug.get("masked_backbone_shape", ())))
+                        print("[shape-log] pooled:", tuple(debug.get("pooled_shape", ())))
+                        print("[shape-log] final_feature:", tuple(debug.get("final_feature_shape", ())))
+                    except Exception:
+                        pass
+                logged_shapes = True
             targets = batch["target"].cpu().numpy()
             feature_batches.append(features)
             target_batches.append(targets)
@@ -298,6 +343,34 @@ def extract_features(
         observation_dates,
         row_indices,
     )
+
+
+def fit_feature_reduction_on_train(
+    train_features: np.ndarray,
+    val_features: np.ndarray,
+    method: str,
+    out_dim: int,
+) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
+    if method == "none":
+        return train_features, val_features, {"method": "none", "output_dim": int(train_features.shape[1])}
+
+    if method == "pca":
+        scaler = StandardScaler()
+        train_scaled = scaler.fit_transform(train_features)
+        val_scaled = scaler.transform(val_features)
+        n_components = int(min(max(1, out_dim), train_scaled.shape[0] - 1, train_scaled.shape[1]))
+        reducer = PCA(n_components=n_components, random_state=0)
+        train_reduced = reducer.fit_transform(train_scaled).astype(np.float32)
+        val_reduced = reducer.transform(val_scaled).astype(np.float32)
+        artifact = {
+            "method": "pca",
+            "output_dim": int(n_components),
+            "scaler": scaler,
+            "reducer": reducer,
+        }
+        return train_reduced, val_reduced, artifact
+
+    raise ValueError(f"Unsupported feature reduction method '{method}'.")
 
 
 def evaluate_predictions(y_true: np.ndarray, y_pred: np.ndarray) -> dict[str, float]:
@@ -548,6 +621,7 @@ def main() -> None:
     regressor_names = _resolve_requested(args.regressors, ALL_REGRESSORS)
     dr_methods = _resolve_requested(args.dr_methods, ALL_DR_METHODS)
     backbone_band_indices = resolve_backbone_band_indices(args.torchgeo_weight)
+    band_recipe = resolve_band_recipe(args.torchgeo_weight)
 
     feature_csv_path = args.output_dir / args.feature_csv_name
 
@@ -573,6 +647,9 @@ def main() -> None:
             test_size=args.test_size,
             random_state=args.random_state,
             band_indices=backbone_band_indices,
+            band_recipe=band_recipe,
+            shapefile_path=args.shapefile_path,
+            shapefile_buffer_m=args.mask_buffer_m,
         )
 
         train_loader = make_dataloader(split.train, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
@@ -583,7 +660,10 @@ def main() -> None:
             # Favor stability over autotuned kernels for feature extraction.
             torch.backends.cudnn.benchmark = False
         backbone_name = resolve_backbone(args.backbone, args.torchgeo_weight)
-        backbone_image_channels = len(backbone_band_indices) if backbone_band_indices is not None else 10
+        if band_recipe in {"satlas_l1c_9_from_l2a", "ndvi_seco_eco_9"}:
+            backbone_image_channels = 9
+        else:
+            backbone_image_channels = len(backbone_band_indices) if backbone_band_indices is not None else 10
         model = build_yellowness_model(
             backbone_name=backbone_name,
             mask_fusion=args.mask_fusion,
@@ -622,6 +702,7 @@ def main() -> None:
     feature_config = {
         "backbone": backbone_name,
         "torchgeo_weight": args.torchgeo_weight,
+        "band_recipe": band_recipe,
         "mask_fusion": args.mask_fusion,
         "pooling": args.pooling,
         "resolution": args.resolution,
@@ -640,6 +721,20 @@ def main() -> None:
         X_val=val_features,
         y_val=y_val,
     )
+
+    reduced_train_features, reduced_val_features, reduction_artifact = fit_feature_reduction_on_train(
+        train_features=train_features,
+        val_features=val_features,
+        method=args.feature_reduction_method,
+        out_dim=args.feature_reduction_dim,
+    )
+
+    if args.log_feature_shapes:
+        print(f"[shape-log] raw feature matrix train={train_features.shape}, val={val_features.shape}")
+        print(
+            f"[shape-log] reduced feature matrix train={reduced_train_features.shape}, "
+            f"val={reduced_val_features.shape}"
+        )
 
     if args.extract_only:
         print(f"Saved features only: {feature_csv_path}")
@@ -660,9 +755,9 @@ def main() -> None:
         transformed_train, transformed_val, dr_artifact, dr_label = _fit_dimensionality_reduction(
             dr_method,
             n_components,
-            train_features,
+            reduced_train_features,
             y_train,
-            val_features,
+            reduced_val_features,
             args.pca_variance,
             args.pls_top_k,
         )
@@ -671,7 +766,7 @@ def main() -> None:
             {
                 "dr_method": dr_method,
                 "n_components": n_components,
-                "input_dim": int(train_features.shape[1]),
+                "input_dim": int(reduced_train_features.shape[1]),
                 "output_dim": int(transformed_train.shape[1]),
                 "pca_variance": args.pca_variance if dr_method == "pca" else None,
                 "pls_top_k": args.pls_top_k if dr_method == "pls" else None,
@@ -705,8 +800,11 @@ def main() -> None:
                     "dr_method": dr_method,
                     "dr_label": dr_label,
                     "n_components": n_components,
+                    "feature_reduction_method": args.feature_reduction_method,
+                    "feature_reduction_dim": args.feature_reduction_dim,
                     "feature_dim": int(transformed_train.shape[1]),
                     "raw_feature_dim": int(train_features.shape[1]),
+                    "reduced_backbone_feature_dim": int(reduced_train_features.shape[1]),
                     "feature_csv": str(feature_csv_path if feature_csv_path.exists() else ""),
                 }
             )
@@ -717,6 +815,7 @@ def main() -> None:
                 pickle.dump(
                     {
                         "regressor": regressor,
+                        "feature_reduction_artifact": reduction_artifact,
                         "dr_method": dr_method,
                         "n_components": n_components,
                         "dr_artifact": dr_artifact,
@@ -757,6 +856,7 @@ def main() -> None:
                     "val_r2": metrics["val"]["r2"],
                     "feature_dim": metrics["feature_dim"],
                     "raw_feature_dim": metrics["raw_feature_dim"],
+                    "reduced_backbone_feature_dim": metrics["reduced_backbone_feature_dim"],
                 }
             )
             print(json.dumps(metrics, indent=2))

@@ -34,6 +34,8 @@ EXPECTED_S2_BAND_ORDER: tuple[str, ...] = (
     "B12",
 )
 
+SATLAS_L1C_9_FROM_L2A_INDICES: tuple[int, ...] = (2, 1, 0, 3, 4, 5, 6, 8, 9)
+
 
 def _normalize_band_name(name: str) -> str:
     text = str(name).strip().upper()
@@ -112,15 +114,19 @@ class ParcelYellownessDataset(Dataset):
         resolution: str = "sr",
         rows: Optional[pd.DataFrame] = None,
         band_indices: Optional[Sequence[int]] = None,
+        band_recipe: Optional[str] = None,
         shapefile_path: Optional[Union[str, Path]] = None,
+        shapefile_buffer_m: float = -20.0,
     ) -> None:
         self.inventory_path = Path(inventory_csv)
         self.root_dir = Path(root_dir) if root_dir else self.inventory_path.parent
         self.resolution = resolution.lower()
         self.inventory = rows.copy().reset_index(drop=True) if rows is not None else pd.read_csv(self.inventory_path)
         self.band_indices = tuple(int(index) for index in band_indices) if band_indices is not None else None
+        self.band_recipe = str(band_recipe).strip().lower() if band_recipe else None
         self.date_col = _resolve_date_column(self.inventory)
         self.shapefile_path = Path(shapefile_path) if shapefile_path else DEFAULT_PARCELS_SHP
+        self.shapefile_buffer_m = float(shapefile_buffer_m)
         self._parcels_gdf: Any = None
         self._parcel_lookup_by_crs: dict[str, dict[str, Any]] = {}
         self._parcel_id_column: Optional[str] = None
@@ -133,6 +139,34 @@ class ParcelYellownessDataset(Dataset):
 
         if "yellowness" not in self.inventory.columns:
             raise ValueError("Inventory must include a 'yellowness' column.")
+
+    def _apply_band_recipe(self, image: np.ndarray) -> np.ndarray:
+        if self.band_recipe is None:
+            return image
+
+        if self.band_recipe == "satlas_l1c_9_from_l2a":
+            if image.shape[0] < 10:
+                raise ValueError(
+                    "SATLAS adaptation requires 10-band L2A input in standard order "
+                    f"{EXPECTED_S2_BAND_ORDER}, got shape={image.shape}."
+                )
+            # SATLAS S2 weights expect pseudo-RGB + SWIR order:
+            # [B04, B03, B02, B05, B06, B07, B08, B11, B12].
+            return image[list(SATLAS_L1C_9_FROM_L2A_INDICES), ...]
+
+        if self.band_recipe == "ndvi_seco_eco_9":
+            if image.shape[0] < 8:
+                raise ValueError(
+                    "NDVI SECO ECO recipe requires at least bands B02..B8A in standard order."
+                )
+            base = image[:8, ...]
+            b4 = image[2, ...]
+            b8 = image[6, ...]
+            ndvi = (b8 - b4) / np.clip(b8 + b4, 1e-6, None)
+            ndvi = np.nan_to_num(ndvi, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
+            return np.concatenate([base, ndvi[None, ...]], axis=0)
+
+        raise ValueError(f"Unsupported band_recipe='{self.band_recipe}'.")
 
     @staticmethod
     def _parcel_key_candidates(value: Any) -> list[str]:
@@ -247,8 +281,16 @@ class ParcelYellownessDataset(Dataset):
             geometry = lookup.get(key)
             if geometry is None:
                 continue
+            buffered_geometry = geometry
+            if self.shapefile_buffer_m != 0.0:
+                try:
+                    candidate = geometry.buffer(self.shapefile_buffer_m)
+                    if not getattr(candidate, "is_empty", True):
+                        buffered_geometry = candidate
+                except Exception:
+                    buffered_geometry = geometry
             mask = rasterize(
-                [(geometry, 1)],
+                [(buffered_geometry, 1)],
                 out_shape=(image_src.height, image_src.width),
                 transform=image_src.transform,
                 fill=0,
@@ -277,6 +319,7 @@ class ParcelYellownessDataset(Dataset):
             else:
                 with rasterio.open(mask_path) as mask_src:
                     mask = mask_src.read(1).astype(np.float32)
+        image = self._apply_band_recipe(image)
         if self.band_indices is not None:
             image = image[list(self.band_indices), ...]
         mask = (mask > 0).astype(np.float32)
@@ -306,7 +349,9 @@ def make_group_split(
     test_size: float = 0.2,
     random_state: int = 42,
     band_indices: Optional[Sequence[int]] = None,
+    band_recipe: Optional[str] = None,
     shapefile_path: Optional[Union[str, Path]] = None,
+    shapefile_buffer_m: float = -20.0,
 ) -> SplitDatasets:
     inventory_path = Path(inventory_csv)
     full_df = pd.read_csv(inventory_path)
@@ -361,7 +406,9 @@ def make_group_split(
             resolution=resolution,
             rows=train_rows,
             band_indices=band_indices,
+            band_recipe=band_recipe,
             shapefile_path=shapefile_path,
+            shapefile_buffer_m=shapefile_buffer_m,
         ),
         val=ParcelYellownessDataset(
             inventory_csv,
@@ -369,7 +416,9 @@ def make_group_split(
             resolution=resolution,
             rows=val_rows,
             band_indices=band_indices,
+            band_recipe=band_recipe,
             shapefile_path=shapefile_path,
+            shapefile_buffer_m=shapefile_buffer_m,
         ),
         train_rows=train_rows,
         val_rows=val_rows,

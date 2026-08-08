@@ -20,6 +20,8 @@ from src.s2_pipeline.yellowness_training import fit_regressor, make_dataloader, 
 def infer_torchgeo_backbone_from_weight(weight_name: str) -> str:
     if weight_name.startswith("ResNet50_Weights."):
         return "torchgeo:resnet50"
+    if weight_name.startswith("ResNet152_Weights."):
+        return "torchgeo:resnet152"
     if weight_name.startswith("ViTSmall16_Weights."):
         return "torchgeo:vit_small_patch16_224"
     if weight_name.startswith("ViTBase16_Weights."):
@@ -51,16 +53,35 @@ def resolve_backbone_band_indices(weight_name: Optional[str]) -> Optional[list[i
 
     satlas_9band_prefixes = (
         "ResNet50_Weights.SENTINEL2_SI_MS_SATLAS",
-        "ResNet50_Weights.SENTINEL2_MI_MS_SATLAS",
+        "ResNet152_Weights.SENTINEL2_SI_MS_SATLAS",
+        
         "Swin_V2_T_Weights.SENTINEL2_SI_MS_SATLAS",
-        "Swin_V2_T_Weights.SENTINEL2_MI_MS_SATLAS",
+        
         "Swin_V2_B_Weights.SENTINEL2_SI_MS_SATLAS",
-        "Swin_V2_B_Weights.SENTINEL2_MI_MS_SATLAS",
+        
     )
     if weight_name.startswith(satlas_9band_prefixes):
-        # SATLAS Sentinel-2 weights expect the 9-band order:
-        # [B04, B03, B02, B05, B06, B07, B08, B11, B12].
-        return [0, 1, 2, 3, 4, 5, 6, 7, 8]
+        return None
+    return None
+
+
+def resolve_band_recipe(weight_name: Optional[str]) -> Optional[str]:
+    if not weight_name:
+        return None
+
+    satlas_9band_prefixes = (
+        "ResNet50_Weights.SENTINEL2_SI_MS_SATLAS",
+        "ResNet152_Weights.SENTINEL2_SI_MS_SATLAS",
+        "Swin_V2_T_Weights.SENTINEL2_SI_MS_SATLAS",
+        "Swin_V2_B_Weights.SENTINEL2_SI_MS_SATLAS",
+        
+    )
+    if weight_name.startswith(satlas_9band_prefixes):
+        return "satlas_l1c_9_from_l2a"
+
+    if weight_name.startswith("SENTINEL2_ALL_NDVI_SECO_ECO"):
+        return "ndvi_seco_eco_9"
+
     return None
 
 
@@ -160,6 +181,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-freeze-backbone", dest="freeze_backbone", action="store_false")
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--sample-patch-size", type=int, default=256)
+    parser.add_argument("--shapefile-path", type=Path, default=None)
+    parser.add_argument("--mask-buffer-m", type=float, default=-20.0)
 
     # New: center crop + rotation augmentation
     parser.add_argument("--center-crop-size", type=int, default=224)
@@ -183,7 +206,11 @@ def main() -> None:
     args.output_dir.mkdir(parents=True, exist_ok=True)
     backbone_name = resolve_backbone(args.backbone, args.torchgeo_weight)
     backbone_band_indices = resolve_backbone_band_indices(args.torchgeo_weight)
-    backbone_image_channels = len(backbone_band_indices) if backbone_band_indices is not None else 10
+    band_recipe = resolve_band_recipe(args.torchgeo_weight)
+    if band_recipe in {"satlas_l1c_9_from_l2a", "ndvi_seco_eco_9"}:
+        backbone_image_channels = 9
+    else:
+        backbone_image_channels = len(backbone_band_indices) if backbone_band_indices is not None else 10
 
     split = make_group_split(
         inventory_csv=args.inventory,
@@ -192,6 +219,9 @@ def main() -> None:
         test_size=args.test_size,
         random_state=args.random_state,
         band_indices=backbone_band_indices,
+        band_recipe=band_recipe,
+        shapefile_path=args.shapefile_path,
+        shapefile_buffer_m=args.mask_buffer_m,
     )
 
     # Build base loaders first
@@ -276,6 +306,7 @@ def main() -> None:
                 "resolution": args.resolution,
                 "backbone": backbone_name,
                 "torchgeo_weight": args.torchgeo_weight,
+                "band_recipe": band_recipe,
                 "mask_fusion": args.mask_fusion,
                 "epochs": args.epochs,
                 "batch_size": args.batch_size,
