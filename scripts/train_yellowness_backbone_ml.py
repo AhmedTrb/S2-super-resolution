@@ -16,12 +16,14 @@ from sklearn.base import BaseEstimator, RegressorMixin
 from sklearn.compose import TransformedTargetRegressor
 from sklearn.cross_decomposition import PLSRegression
 from sklearn.ensemble import ExtraTreesRegressor, RandomForestRegressor
+from sklearn.feature_selection import f_regression, mutual_info_regression
 from sklearn.linear_model import RidgeCV
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.decomposition import PCA
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from torch import nn
+from torch.utils.data import DataLoader, Dataset
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -84,6 +86,55 @@ class BackboneFeatureExtractor(nn.Module):
         return self.model.extract_features(image, mask)
 
 
+def _center_crop_last2d(x: torch.Tensor, crop_size: int) -> torch.Tensor:
+    if x.ndim < 2:
+        return x
+    h, w = x.shape[-2], x.shape[-1]
+    if crop_size is None or crop_size <= 0 or (crop_size == h and crop_size == w):
+        return x
+    if crop_size > h or crop_size > w:
+        raise ValueError(f"crop_size={crop_size} is larger than sample size {(h, w)}")
+    top = (h - crop_size) // 2
+    left = (w - crop_size) // 2
+    return x[..., top : top + crop_size, left : left + crop_size]
+
+
+def _transform_sample(obj: Any, crop_size: int) -> Any:
+    if torch.is_tensor(obj):
+        return _center_crop_last2d(obj, crop_size)
+    if isinstance(obj, dict):
+        return {k: _transform_sample(v, crop_size) for k, v in obj.items()}
+    if isinstance(obj, tuple):
+        return tuple(_transform_sample(v, crop_size) for v in obj)
+    if isinstance(obj, list):
+        return [_transform_sample(v, crop_size) for v in obj]
+    return obj
+
+
+class CenterCropDataset(Dataset):
+    def __init__(self, base_dataset: Dataset, crop_size: int) -> None:
+        self.base_dataset = base_dataset
+        self.crop_size = int(crop_size)
+
+    def __len__(self) -> int:
+        return len(self.base_dataset)
+
+    def __getitem__(self, index: int) -> Any:
+        sample = self.base_dataset[index]
+        return _transform_sample(sample, self.crop_size)
+
+
+def _rebuild_loader(base_loader: DataLoader, dataset: Dataset, shuffle: bool, batch_size: int, num_workers: int) -> DataLoader:
+    return DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=shuffle,
+        num_workers=num_workers,
+        pin_memory=base_loader.pin_memory,
+        persistent_workers=num_workers > 0,
+    )
+
+
 def infer_torchgeo_backbone_from_weight(weight_name: str) -> str:
     if weight_name.startswith("ResNet50_Weights."):
         return "torchgeo:resnet50"
@@ -141,7 +192,7 @@ def resolve_band_recipe(weight_name: Optional[str]) -> Optional[str]:
     if weight_name.startswith(satlas_9band_prefixes):
         return "satlas_l1c_9_from_l2a"
 
-    if weight_name.startswith("SENTINEL2_ALL_NDVI_SECO_ECO"):
+    if "SENTINEL2_ALL_NDVI_SECO_ECO" in weight_name:
         return "ndvi_seco_eco_9"
 
     return None
@@ -171,8 +222,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--center-crop-size", type=int, default=224)
     parser.add_argument("--shapefile-path", type=Path, default=None)
     parser.add_argument("--mask-buffer-m", type=float, default=-20.0)
-    parser.add_argument("--feature-reduction-method", choices=("none", "pca"), default="none")
+    parser.add_argument(
+        "--feature-reduction-method",
+        choices=("none", "pca", "pca_var95", "mi_topk", "f_reg_topk", "var_topk"),
+        default="none",
+    )
     parser.add_argument("--feature-reduction-dim", type=int, default=64)
+    parser.add_argument(
+        "--feature-reduction-variance",
+        type=float,
+        default=0.95,
+        help="Explained variance target used by --feature-reduction-method pca_var95.",
+    )
     parser.add_argument("--log-feature-shapes", action="store_true")
     parser.add_argument("--test-size", type=float, default=0.2)
     parser.add_argument("--random-state", type=int, default=42)
@@ -347,9 +408,12 @@ def extract_features(
 
 def fit_feature_reduction_on_train(
     train_features: np.ndarray,
+    y_train: np.ndarray,
     val_features: np.ndarray,
     method: str,
     out_dim: int,
+    variance_target: float,
+    random_state: int,
 ) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
     if method == "none":
         return train_features, val_features, {"method": "none", "output_dim": int(train_features.shape[1])}
@@ -369,6 +433,48 @@ def fit_feature_reduction_on_train(
             "reducer": reducer,
         }
         return train_reduced, val_reduced, artifact
+
+    if method == "pca_var95":
+        scaler = StandardScaler()
+        train_scaled = scaler.fit_transform(train_features)
+        val_scaled = scaler.transform(val_features)
+        target = float(np.clip(variance_target, 0.5, 0.999))
+        reducer = PCA(n_components=target, random_state=random_state)
+        train_reduced = reducer.fit_transform(train_scaled).astype(np.float32)
+        val_reduced = reducer.transform(val_scaled).astype(np.float32)
+        artifact = {
+            "method": "pca_var95",
+            "variance_target": float(target),
+            "output_dim": int(train_reduced.shape[1]),
+            "scaler": scaler,
+            "reducer": reducer,
+        }
+        return train_reduced, val_reduced, artifact
+
+    if method in {"mi_topk", "f_reg_topk", "var_topk"}:
+        feature_count = int(train_features.shape[1])
+        top_k = int(min(max(1, out_dim), feature_count))
+        target = np.asarray(y_train, dtype=np.float32)
+
+        if method == "mi_topk":
+            scores = mutual_info_regression(train_features, y=target, random_state=random_state)
+            scores = np.nan_to_num(scores, nan=-np.inf)
+        elif method == "f_reg_topk":
+            scores, _ = f_regression(train_features, target, center=True)
+            scores = np.nan_to_num(scores, nan=-np.inf)
+        else:
+            scores = np.var(train_features, axis=0)
+
+        selected_indices = np.argsort(-scores, kind="stable")[:top_k]
+        train_selected = train_features[:, selected_indices].astype(np.float32)
+        val_selected = val_features[:, selected_indices].astype(np.float32)
+        artifact = {
+            "method": method,
+            "output_dim": int(top_k),
+            "selected_indices": selected_indices.tolist(),
+            "scores": scores[selected_indices].astype(float).tolist(),
+        }
+        return train_selected, val_selected, artifact
 
     raise ValueError(f"Unsupported feature reduction method '{method}'.")
 
@@ -652,8 +758,26 @@ def main() -> None:
             shapefile_buffer_m=args.mask_buffer_m,
         )
 
-        train_loader = make_dataloader(split.train, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
-        val_loader = make_dataloader(split.val, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
+        train_base_loader = make_dataloader(split.train, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
+        val_base_loader = make_dataloader(split.val, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
+
+        train_dataset = CenterCropDataset(train_base_loader.dataset, crop_size=args.center_crop_size)
+        val_dataset = CenterCropDataset(val_base_loader.dataset, crop_size=args.center_crop_size)
+
+        train_loader = _rebuild_loader(
+            train_base_loader,
+            train_dataset,
+            shuffle=False,
+            batch_size=args.batch_size,
+            num_workers=args.num_workers,
+        )
+        val_loader = _rebuild_loader(
+            val_base_loader,
+            val_dataset,
+            shuffle=False,
+            batch_size=args.batch_size,
+            num_workers=args.num_workers,
+        )
 
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         if device.type == "cuda":
@@ -664,6 +788,11 @@ def main() -> None:
             backbone_image_channels = 9
         else:
             backbone_image_channels = len(backbone_band_indices) if backbone_band_indices is not None else 10
+        print(
+            f"[band-audit] backbone={backbone_name} | weight={args.torchgeo_weight} | "
+            f"band_recipe={band_recipe} | band_indices={backbone_band_indices} | "
+            f"image_channels={backbone_image_channels}"
+        )
         model = build_yellowness_model(
             backbone_name=backbone_name,
             mask_fusion=args.mask_fusion,
@@ -703,6 +832,8 @@ def main() -> None:
         "backbone": backbone_name,
         "torchgeo_weight": args.torchgeo_weight,
         "band_recipe": band_recipe,
+        "backbone_band_indices": backbone_band_indices,
+        "expected_image_channels": int(9 if band_recipe in {"satlas_l1c_9_from_l2a", "ndvi_seco_eco_9"} else (len(backbone_band_indices) if backbone_band_indices is not None else 10)),
         "mask_fusion": args.mask_fusion,
         "pooling": args.pooling,
         "resolution": args.resolution,
@@ -724,9 +855,12 @@ def main() -> None:
 
     reduced_train_features, reduced_val_features, reduction_artifact = fit_feature_reduction_on_train(
         train_features=train_features,
+        y_train=y_train,
         val_features=val_features,
         method=args.feature_reduction_method,
         out_dim=args.feature_reduction_dim,
+        variance_target=args.feature_reduction_variance,
+        random_state=args.random_state,
     )
 
     if args.log_feature_shapes:
