@@ -17,7 +17,7 @@ from sklearn.compose import TransformedTargetRegressor
 from sklearn.cross_decomposition import PLSRegression
 from sklearn.ensemble import ExtraTreesRegressor, RandomForestRegressor
 from sklearn.feature_selection import f_regression, mutual_info_regression
-from sklearn.linear_model import RidgeCV
+from sklearn.linear_model import BayesianRidge, RidgeCV
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.decomposition import PCA
 from sklearn.pipeline import Pipeline
@@ -34,6 +34,7 @@ from src.s2_pipeline.yellowness_training import make_dataloader, make_group_spli
 
 
 ALL_REGRESSORS: tuple[str, ...] = (
+    "bayesian_ridge",
     "ridge",
     "pls",
     "random_forest",
@@ -302,6 +303,16 @@ def parse_args() -> argparse.Namespace:
 
 
 def build_regressor(name: str, random_state: int) -> Any:
+    if name == "bayesian_ridge":
+        return TransformedTargetRegressor(
+            regressor=Pipeline(
+                steps=[
+                    ("scale", StandardScaler()),
+                    ("bayesian_ridge", BayesianRidge()),
+                ]
+            )
+        )
+
     if name == "ridge":
         return TransformedTargetRegressor(
             regressor=Pipeline(
