@@ -224,7 +224,7 @@ def compute_train_band_stats(dataset: ParcelYellownessDataset, patch_size: int) 
             c = img.shape[0]
             sum_c = torch.zeros(c, dtype=torch.float64)
             sum_sq_c = torch.zeros(c, dtype=torch.float64)
-        flat = img.view(img.shape[0], -1).double()
+        flat = img.reshape(img.shape[0], -1).double()
         sum_c += flat.sum(dim=1)
         sum_sq_c += (flat * flat).sum(dim=1)
         count += flat.shape[1]
