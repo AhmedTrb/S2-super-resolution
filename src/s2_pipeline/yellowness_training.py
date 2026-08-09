@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import re
 from typing import Any, Dict, Iterable, Optional, Sequence, Tuple, Union
 
 import numpy as np
@@ -68,6 +69,17 @@ def _align_s2_band_order(image: np.ndarray, descriptions: Sequence[str]) -> np.n
 
 def _resolve_first(columns: Iterable[str], options: Sequence[str]) -> Optional[str]:
     return next((name for name in options if name in columns), None)
+
+
+def _extract_plot_ids_from_path(value: Any) -> list[str]:
+    text = str(value).strip().replace("\\", "/")
+    if not text or text.lower() == "nan":
+        return []
+
+    matches = re.findall(r"(?:^|/)(?:lr|sr)_plot_(\d+)", text, flags=re.IGNORECASE)
+    if not matches:
+        matches = re.findall(r"plot_(\d+)", text, flags=re.IGNORECASE)
+    return list(dict.fromkeys(matches))
 
 
 def _normalize_image(image: np.ndarray) -> np.ndarray:
@@ -245,10 +257,17 @@ class ParcelYellownessDataset(Dataset):
 
     def _row_parcel_keys(self, row: pd.Series) -> list[str]:
         keys: list[str] = []
-        for column in ("ID_PARCEL", "id_plot", "parcel_ref_id", "parcel_index"):
+        for column in ("ID_PARCEL", "id_plot", "PARCEL_ID", "parcel_id", "plot_id", "parcel_ref_id", "parcel_index"):
             if column not in row.index:
                 continue
             keys.extend(self._parcel_key_candidates(row.get(column)))
+
+        # Fallback for inventories that only encode parcel id in image/mask filename.
+        for column in (self.image_col, self.mask_col):
+            if column is None or column not in row.index:
+                continue
+            for plot_id in _extract_plot_ids_from_path(row.get(column)):
+                keys.extend(self._parcel_key_candidates(plot_id))
         return list(dict.fromkeys(keys))
 
     def _parcel_lookup_for_crs(self, target_crs: Any) -> dict[str, Any]:
@@ -277,10 +296,12 @@ class ParcelYellownessDataset(Dataset):
 
     def _build_mask_from_shapefile(self, row: pd.Series, image_src: Any) -> np.ndarray:
         lookup = self._parcel_lookup_for_crs(image_src.crs)
-        for key in self._row_parcel_keys(row):
+        row_keys = self._row_parcel_keys(row)
+        for key in row_keys:
             geometry = lookup.get(key)
             if geometry is None:
                 continue
+            candidates: list[Any] = []
             buffered_geometry = geometry
             if self.shapefile_buffer_m != 0.0:
                 try:
@@ -289,18 +310,26 @@ class ParcelYellownessDataset(Dataset):
                         buffered_geometry = candidate
                 except Exception:
                     buffered_geometry = geometry
-            mask = rasterize(
-                [(buffered_geometry, 1)],
-                out_shape=(image_src.height, image_src.width),
-                transform=image_src.transform,
-                fill=0,
-                dtype=np.uint8,
-            )
-            return mask.astype(np.float32)
+
+            # Prefer buffered geometry (parcel interior), but fallback to original geometry if empty after rasterization.
+            candidates.append(buffered_geometry)
+            if buffered_geometry is not geometry:
+                candidates.append(geometry)
+
+            for geom in candidates:
+                mask = rasterize(
+                    [(geom, 1)],
+                    out_shape=(image_src.height, image_src.width),
+                    transform=image_src.transform,
+                    fill=0,
+                    dtype=np.uint8,
+                ).astype(np.float32)
+                if float(mask.sum()) > 0.0:
+                    return mask
 
         raise FileNotFoundError(
             "Mask file is missing and corresponding parcel geometry could not be found in shapefile "
-            f"{self.shapefile_path} for row keys={self._row_parcel_keys(row)}"
+            f"{self.shapefile_path} for row keys={row_keys}"
         )
 
     def __len__(self) -> int:
@@ -319,6 +348,9 @@ class ParcelYellownessDataset(Dataset):
             else:
                 with rasterio.open(mask_path) as mask_src:
                     mask = mask_src.read(1).astype(np.float32)
+                if float(np.nansum(mask > 0)) <= 0.0:
+                    # Some inventories contain placeholder/empty mask rasters; regenerate from shapefile.
+                    mask = self._build_mask_from_shapefile(row, src)
         image = self._apply_band_recipe(image)
         if self.band_indices is not None:
             image = image[list(self.band_indices), ...]

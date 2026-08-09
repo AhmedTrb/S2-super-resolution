@@ -155,6 +155,29 @@ def center_crop(x: torch.Tensor, size: int) -> torch.Tensor:
     return x[..., top : top + size, left : left + size]
 
 
+def crop_image_and_mask(image: torch.Tensor, mask: torch.Tensor, size: int) -> tuple[torch.Tensor, torch.Tensor]:
+    h, w = image.shape[-2], image.shape[-1]
+    if size is None or size <= 0:
+        return image, mask
+    if h < size or w < size:
+        raise ValueError(f"Requested patch size {size} but got sample size {(h, w)}")
+
+    nonzero = torch.nonzero(mask[0] > 0, as_tuple=False)
+    if nonzero.numel() > 0:
+        center_y = int(nonzero[:, 0].float().mean().round().item())
+        center_x = int(nonzero[:, 1].float().mean().round().item())
+        top = max(0, min(center_y - size // 2, h - size))
+        left = max(0, min(center_x - size // 2, w - size))
+    else:
+        top = (h - size) // 2
+        left = (w - size) // 2
+
+    return (
+        image[..., top : top + size, left : left + size],
+        mask[..., top : top + size, left : left + size],
+    )
+
+
 def apply_train_aug(image: torch.Tensor, mask: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     if torch.rand(()) < 0.5:
         image = torch.flip(image, dims=(-1,))
@@ -192,11 +215,12 @@ class FoldDataset(Dataset):
         image = sample["image"].float()
         mask = sample["mask"].float()
 
-        image = center_crop(image, self.patch_size)
-        mask = center_crop(mask, self.patch_size)
+        image, mask = crop_image_and_mask(image, mask, self.patch_size)
 
         if mask.sum().item() <= 0:
-            raise ValueError(f"Empty mask found at row_index={sample.get('row_index')}")
+            raise ValueError(
+                f"Empty mask found at row_index={sample.get('row_index')} id_plot={sample.get('id_plot')}"
+            )
 
         if self.augment:
             image, mask = apply_train_aug(image, mask)
