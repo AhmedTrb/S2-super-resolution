@@ -79,6 +79,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--python", default="python")
     p.add_argument("--base-name", default="small_cnn_ablation")
+    p.add_argument("--multi-gpu", choices=["auto", "single", "dp"], default="auto")
     return p.parse_args()
 
 
@@ -125,6 +126,8 @@ def main() -> None:
         "--model-kind",
         "baseline",
         "--no-augmentation",
+        "--multi-gpu",
+        str(args.multi_gpu),
     ]
     _run(split_cmd, cwd=repo)
     shared_split = Path(args.output_dir) / split_exp_name / args.resolution / "split_ids.json"
@@ -168,6 +171,8 @@ def main() -> None:
             str(args.seed),
             "--split-ids-path",
             str(shared_split),
+            "--multi-gpu",
+            str(args.multi_gpu),
         ] + exp["flags"]
 
         _run(cmd, cwd=repo)

@@ -453,6 +453,12 @@ class TrainConfig:
     loss_name: str
     augmentation: bool
     select_on: str
+    multi_gpu: str
+    log_jsonl: bool
+
+
+def _unwrap_model(model: nn.Module) -> nn.Module:
+    return model.module if isinstance(model, nn.DataParallel) else model
 
 
 def save_yaml(path: Path, data: dict[str, Any]) -> None:
@@ -513,7 +519,7 @@ def train_one_fold(
             "type": "baseline",
         }
 
-    model = SmallMaskedCNNRegressor(
+    base_model = SmallMaskedCNNRegressor(
         SmallMaskedCNNConfig(
             image_channels=10,
             use_mask_channel=cfg.use_mask_channel,
@@ -521,6 +527,17 @@ def train_one_fold(
             dropout=0.2,
         )
     ).to(device)
+
+    use_data_parallel = (
+        cfg.multi_gpu in {"auto", "dp"}
+        and device.type == "cuda"
+        and torch.cuda.device_count() >= 2
+    )
+    model: nn.Module = nn.DataParallel(base_model) if use_data_parallel else base_model
+    if use_data_parallel:
+        print(f"[multi-gpu] Using DataParallel on {torch.cuda.device_count()} GPUs")
+    else:
+        print(f"[multi-gpu] Running on device={device}")
 
     loss_fn = get_loss(cfg.loss_name)
     opt = AdamW(model.parameters(), lr=cfg.learning_rate, weight_decay=cfg.weight_decay)
@@ -531,6 +548,9 @@ def train_one_fold(
     best_epoch = 0
     best_state: Optional[dict[str, Any]] = None
     stale_epochs = 0
+    history_jsonl_path = fold_dir / "history.jsonl"
+    if history_jsonl_path.exists():
+        history_jsonl_path.unlink()
 
     for epoch in range(1, cfg.max_epochs + 1):
         t0 = time.perf_counter()
@@ -558,6 +578,15 @@ def train_one_fold(
             "epoch_duration_sec": duration,
         }
         history.append(row)
+        if cfg.log_jsonl:
+            with history_jsonl_path.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(row) + "\n")
+        print(
+            f"[fold {fold_idx:02d}] epoch={epoch:03d} "
+            f"train_loss={tr_loss:.5f} val_loss={va_loss:.5f} "
+            f"train_mae={tr_m['MAE']:.5f} val_mae={va_m['MAE']:.5f} "
+            f"train_r2={tr_m['R2']:.4f} val_r2={va_m['R2']:.4f} lr={lr_now:.2e}"
+        )
 
         monitor = va_m["MAE"] if cfg.select_on == "val_mae" else va_loss
         scheduler.step(va_loss)
@@ -566,12 +595,14 @@ def train_one_fold(
             best_epoch = epoch
             stale_epochs = 0
             best_state = {
-                "model": model.state_dict(),
+                "model": _unwrap_model(model).state_dict(),
                 "epoch": epoch,
                 "monitor": best_value,
                 "config": asdict(cfg),
                 "mean": mean.cpu(),
                 "std": std.cpu(),
+                "multi_gpu_used": bool(use_data_parallel),
+                "gpu_count": int(torch.cuda.device_count() if device.type == "cuda" else 0),
             }
         else:
             stale_epochs += 1
@@ -585,7 +616,7 @@ def train_one_fold(
     torch.save(best_state, fold_dir / "best_model.pt")
     pd.DataFrame(history).to_csv(fold_dir / "history.csv", index=False)
 
-    model.load_state_dict(best_state["model"])
+    _unwrap_model(model).load_state_dict(best_state["model"])
     pred_tr = predict_full(model, train_loader, device)
     pred_va = predict_full(model, val_loader, device)
     pred_tr.to_csv(fold_dir / "predictions_train.csv", index=False)
@@ -702,8 +733,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--augmentation", dest="augmentation", action="store_true")
     p.add_argument("--no-augmentation", dest="augmentation", action="store_false")
     p.add_argument("--select-on", choices=["val_mae", "val_loss"], default="val_mae")
+    p.add_argument("--multi-gpu", choices=["auto", "single", "dp"], default="auto")
+    p.add_argument("--log-jsonl", dest="log_jsonl", action="store_true")
+    p.add_argument("--no-log-jsonl", dest="log_jsonl", action="store_false")
 
-    p.set_defaults(use_mask_channel=True, augmentation=True)
+    p.set_defaults(use_mask_channel=True, augmentation=True, log_jsonl=True)
     return p.parse_args()
 
 
@@ -734,6 +768,8 @@ def main() -> None:
         loss_name=str(args.loss),
         augmentation=bool(args.augmentation),
         select_on=str(args.select_on),
+        multi_gpu=str(args.multi_gpu),
+        log_jsonl=bool(args.log_jsonl),
     )
 
     out_root = Path(cfg.output_dir) / cfg.experiment_name / cfg.resolution
