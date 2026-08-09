@@ -736,6 +736,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--multi-gpu", choices=["auto", "single", "dp"], default="auto")
     p.add_argument("--log-jsonl", dest="log_jsonl", action="store_true")
     p.add_argument("--no-log-jsonl", dest="log_jsonl", action="store_false")
+    p.add_argument("--require-gpu", action="store_true")
 
     p.set_defaults(use_mask_channel=True, augmentation=True, log_jsonl=True)
     return p.parse_args()
@@ -744,6 +745,18 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     set_seed(args.seed)
+
+    cuda_available = torch.cuda.is_available()
+    gpu_count = int(torch.cuda.device_count()) if cuda_available else 0
+    print(
+        f"[env] torch={torch.__version__} cuda_available={cuda_available} "
+        f"gpu_count={gpu_count} multi_gpu={args.multi_gpu}"
+    )
+    if args.require_gpu and not cuda_available:
+        raise RuntimeError(
+            "GPU is required (--require-gpu) but CUDA is not available. "
+            "On Kaggle, enable GPU accelerator in notebook settings and restart the kernel."
+        )
 
     cfg = TrainConfig(
         experiment_name=args.experiment_name,
