@@ -99,29 +99,40 @@ def _center_crop_last2d(x: torch.Tensor, crop_size: int) -> torch.Tensor:
     return x[..., top : top + crop_size, left : left + crop_size]
 
 
-def _transform_sample(obj: Any, crop_size: int) -> Any:
+def _rotate_last2d(x: torch.Tensor, k: int) -> torch.Tensor:
+    if x.ndim < 2 or k % 4 == 0:
+        return x
+    return torch.rot90(x, k=k % 4, dims=(-2, -1))
+
+
+def _transform_sample(obj: Any, crop_size: int, rot_k: int) -> Any:
     if torch.is_tensor(obj):
-        return _center_crop_last2d(obj, crop_size)
+        y = _center_crop_last2d(obj, crop_size)
+        return _rotate_last2d(y, rot_k)
     if isinstance(obj, dict):
-        return {k: _transform_sample(v, crop_size) for k, v in obj.items()}
+        return {k: _transform_sample(v, crop_size, rot_k) for k, v in obj.items()}
     if isinstance(obj, tuple):
-        return tuple(_transform_sample(v, crop_size) for v in obj)
+        return tuple(_transform_sample(v, crop_size, rot_k) for v in obj)
     if isinstance(obj, list):
-        return [_transform_sample(v, crop_size) for v in obj]
+        return [_transform_sample(v, crop_size, rot_k) for v in obj]
     return obj
 
 
-class CenterCropDataset(Dataset):
-    def __init__(self, base_dataset: Dataset, crop_size: int) -> None:
+class CenterCropRotateDataset(Dataset):
+    def __init__(self, base_dataset: Dataset, crop_size: int, enable_rotations: bool) -> None:
         self.base_dataset = base_dataset
         self.crop_size = int(crop_size)
+        self.enable_rotations = bool(enable_rotations)
+        self.multiplier = 4 if self.enable_rotations else 1
 
     def __len__(self) -> int:
-        return len(self.base_dataset)
+        return len(self.base_dataset) * self.multiplier
 
     def __getitem__(self, index: int) -> Any:
-        sample = self.base_dataset[index]
-        return _transform_sample(sample, self.crop_size)
+        base_index = index % len(self.base_dataset)
+        rot_k = (index // len(self.base_dataset)) if self.enable_rotations else 0
+        sample = self.base_dataset[base_index]
+        return _transform_sample(sample, self.crop_size, rot_k)
 
 
 def _rebuild_loader(base_loader: DataLoader, dataset: Dataset, shuffle: bool, batch_size: int, num_workers: int) -> DataLoader:
@@ -220,6 +231,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--data-parallel", dest="data_parallel", action="store_true")
     parser.add_argument("--no-data-parallel", dest="data_parallel", action="store_false")
     parser.add_argument("--center-crop-size", type=int, default=224)
+    parser.add_argument("--rotate-augment", dest="rotate_augment", action="store_true")
+    parser.add_argument("--no-rotate-augment", dest="rotate_augment", action="store_false")
     parser.add_argument("--shapefile-path", type=Path, default=None)
     parser.add_argument("--mask-buffer-m", type=float, default=-20.0)
     parser.add_argument(
@@ -256,10 +269,24 @@ def parse_args() -> argparse.Namespace:
         help="Fraction of variance to preserve with PCA.",
     )
     parser.add_argument(
+        "--pca-components-grid",
+        nargs="+",
+        type=int,
+        default=None,
+        help="Optional explicit PCA component grid. When provided, PCA DR is run once per valid n_components value.",
+    )
+    parser.add_argument(
         "--pls-top-k",
         type=int,
         default=8,
         help="Number of target-correlated features to keep before PLS.",
+    )
+    parser.add_argument(
+        "--pls-components-grid",
+        nargs="+",
+        type=int,
+        default=None,
+        help="Optional explicit PLS latent-component grid. Values are capped by sample and selected-feature limits.",
     )
     parser.add_argument("--save-feature-csv", dest="save_feature_csv", action="store_true")
     parser.add_argument("--no-save-feature-csv", dest="save_feature_csv", action="store_false")
@@ -270,7 +297,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--export-deep-runs-summary", dest="export_deep_runs_summary", action="store_true")
     parser.add_argument("--no-export-deep-runs-summary", dest="export_deep_runs_summary", action="store_false")
     parser.add_argument("--output-dir", type=Path, default=Path("outputs") / "yellowness_backbone_ml")
-    parser.set_defaults(save_feature_csv=True, export_deep_runs_summary=True, data_parallel=False)
+    parser.set_defaults(save_feature_csv=True, export_deep_runs_summary=True, data_parallel=False, rotate_augment=False)
     return parser.parse_args()
 
 
@@ -641,11 +668,26 @@ def _fit_dimensionality_reduction(
         scaler = StandardScaler()
         train_scaled = scaler.fit_transform(train_features)
         val_scaled = scaler.transform(val_features)
-        pca = PCA(n_components=pca_variance, random_state=0)
+        if n_components is None:
+            pca = PCA(n_components=pca_variance, random_state=0)
+            dr_label = f"pca_var_{int(round(pca_variance * 100)):03d}"
+        else:
+            max_valid_components = int(min(train_scaled.shape[0] - 1, train_scaled.shape[1]))
+            if max_valid_components < 1:
+                raise ValueError("PCA requires at least two training samples and one feature.")
+            explicit_components = int(min(max(1, n_components), max_valid_components))
+            pca = PCA(n_components=explicit_components, random_state=0)
+            dr_label = f"pca_nc{explicit_components:03d}"
         train_reduced = pca.fit_transform(train_scaled)
         val_reduced = pca.transform(val_scaled)
-        artifact = {"scaler": scaler, "pca": pca, "variance_threshold": pca_variance}
-        return train_reduced, val_reduced, artifact, "pca_095"
+        artifact = {
+            "scaler": scaler,
+            "pca": pca,
+            "variance_threshold": pca_variance if n_components is None else None,
+            "resolved_n_components": int(train_reduced.shape[1]),
+            "requested_n_components": n_components,
+        }
+        return train_reduced, val_reduced, artifact, dr_label
 
     if method == "pls":
         selected_train, selected_val, selected_indices = _select_target_correlated_features(
@@ -660,8 +702,11 @@ def _fit_dimensionality_reduction(
         max_valid_components = int(min(train_scaled.shape[0] - 1, train_scaled.shape[1]))
         if max_valid_components < 1:
             raise ValueError("PLS requires at least two training samples and one selected feature.")
-        n_components = min(int(pls_top_k), max_valid_components)
-        pls = PLSRegression(n_components=n_components)
+        if n_components is None:
+            resolved_n_components = min(int(pls_top_k), max_valid_components)
+        else:
+            resolved_n_components = min(int(max(1, n_components)), max_valid_components)
+        pls = PLSRegression(n_components=resolved_n_components)
         pls.fit(train_scaled, y_train)
         train_reduced = pls.transform(train_scaled)
         val_reduced = pls.transform(val_scaled)
@@ -669,8 +714,10 @@ def _fit_dimensionality_reduction(
             "scaler": scaler,
             "pls": pls,
             "selected_feature_indices": selected_indices.tolist(),
+            "resolved_n_components": int(resolved_n_components),
+            "requested_n_components": n_components,
         }
-        return train_reduced, val_reduced, artifact, f"pls_top{len(selected_indices):03d}_nc{n_components:03d}"
+        return train_reduced, val_reduced, artifact, f"pls_top{len(selected_indices):03d}_nc{resolved_n_components:03d}"
 
     raise ValueError(f"Unsupported dimensionality reduction method '{method}'.")
 
@@ -761,8 +808,16 @@ def main() -> None:
         train_base_loader = make_dataloader(split.train, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
         val_base_loader = make_dataloader(split.val, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
 
-        train_dataset = CenterCropDataset(train_base_loader.dataset, crop_size=args.center_crop_size)
-        val_dataset = CenterCropDataset(val_base_loader.dataset, crop_size=args.center_crop_size)
+        train_dataset = CenterCropRotateDataset(
+            train_base_loader.dataset,
+            crop_size=args.center_crop_size,
+            enable_rotations=args.rotate_augment,
+        )
+        val_dataset = CenterCropRotateDataset(
+            val_base_loader.dataset,
+            crop_size=args.center_crop_size,
+            enable_rotations=False,
+        )
 
         train_loader = _rebuild_loader(
             train_base_loader,
@@ -837,6 +892,7 @@ def main() -> None:
         "mask_fusion": args.mask_fusion,
         "pooling": args.pooling,
         "resolution": args.resolution,
+        "rotate_augment": bool(args.rotate_augment),
         "raw_feature_dim": int(train_features.shape[1]),
         "num_train": int(train_features.shape[0]),
         "num_val": int(val_features.shape[0]),
@@ -877,13 +933,23 @@ def main() -> None:
     dr_sweep_rows: list[dict[str, Any]] = []
     summary_rows: list[dict[str, Any]] = []
     dr_configs: list[tuple[str, Optional[int]]] = []
+    max_dr_components = int(min(reduced_train_features.shape[0] - 1, reduced_train_features.shape[1]))
     for method in dr_methods:
         if method == "none":
             dr_configs.append(("none", None))
         elif method == "pca":
-            dr_configs.append(("pca", None))
+            if args.pca_components_grid:
+                for n_components in _component_candidates(args.pca_components_grid, max_dr_components):
+                    dr_configs.append(("pca", n_components))
+            else:
+                dr_configs.append(("pca", None))
         elif method == "pls":
-            dr_configs.append(("pls", None))
+            pls_max_components = int(min(args.pls_top_k, max_dr_components))
+            if args.pls_components_grid:
+                for n_components in _component_candidates(args.pls_components_grid, pls_max_components):
+                    dr_configs.append(("pls", n_components))
+            else:
+                dr_configs.append(("pls", None))
 
     for dr_method, n_components in dr_configs:
         transformed_train, transformed_val, dr_artifact, dr_label = _fit_dimensionality_reduction(
