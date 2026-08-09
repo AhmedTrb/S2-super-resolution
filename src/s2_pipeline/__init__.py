@@ -5,6 +5,7 @@ from .indices import SpectralIndexComputer
 from .masks import ParcelMaskGenerator
 from .patching import ParcelPatchExtractor, PatchWindow
 from .pipeline import ObservationDrivenS2Pipeline, TorchGeoParcelDataset
+from .small_masked_cnn import SmallMaskedCNNConfig, SmallMaskedCNNRegressor
 from .super_resolution import SuperResolutionProcessor
 from .yellowness_model import MaskFusionMode, MaskedYellownessRegressor, PoolingMode, build_yellowness_model
 from .yellowness_training import ParcelYellownessDataset, evaluate_regressor, fit_regressor, make_group_split
@@ -18,6 +19,8 @@ __all__ = [
     "SuperResolutionProcessor",
     "ObservationDrivenS2Pipeline",
     "TorchGeoParcelDataset",
+    "SmallMaskedCNNConfig",
+    "SmallMaskedCNNRegressor",
     "MaskFusionMode",
     "PoolingMode",
     "MaskedYellownessRegressor",
