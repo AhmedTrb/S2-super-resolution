@@ -191,7 +191,7 @@ class ParcelYellownessDataset(Dataset):
 
         normalized = text.replace("\\", "/")
         stripped = normalized.lstrip("./")
-        basename = Path(stripped).name
+        basename = stripped.split("/")[-1]
 
         paths: list[Path] = []
         raw = Path(text)
