@@ -26,36 +26,12 @@ def _load_metrics(path: Path) -> dict[str, Any]:
 def _experiment_grid() -> list[dict[str, Any]]:
     return [
         {
-            "name": "exp1_baselines",
-            "flags": ["--model-kind", "baseline", "--no-augmentation"],
-        },
-        {
             "name": "exp2_cnn_global_nomask",
             "flags": ["--model-kind", "cnn", "--pooling-mode", "global_avg", "--no-use-mask-channel", "--no-augmentation"],
         },
         {
-            "name": "exp3_cnn_global_mask",
-            "flags": ["--model-kind", "cnn", "--pooling-mode", "global_avg", "--use-mask-channel", "--no-augmentation"],
-        },
-        {
-            "name": "exp4_cnn_masked_nomask",
-            "flags": ["--model-kind", "cnn", "--pooling-mode", "masked_avg", "--no-use-mask-channel", "--no-augmentation"],
-        },
-        {
-            "name": "exp5_cnn_masked_mask",
-            "flags": ["--model-kind", "cnn", "--pooling-mode", "masked_avg", "--use-mask-channel", "--no-augmentation"],
-        },
-        {
             "name": "exp6_cnn_masked_mask_aug",
             "flags": ["--model-kind", "cnn", "--pooling-mode", "masked_avg", "--use-mask-channel", "--augmentation"],
-        },
-        {
-            "name": "exp7_loss_mse",
-            "flags": ["--model-kind", "cnn", "--pooling-mode", "masked_avg", "--use-mask-channel", "--augmentation", "--loss", "mse"],
-        },
-        {
-            "name": "exp8_loss_mae",
-            "flags": ["--model-kind", "cnn", "--pooling-mode", "masked_avg", "--use-mask-channel", "--augmentation", "--loss", "mae"],
         },
     ]
 
