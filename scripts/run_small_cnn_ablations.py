@@ -26,11 +26,15 @@ def _load_metrics(path: Path) -> dict[str, Any]:
 def _experiment_grid() -> list[dict[str, Any]]:
     return [
         {
-            "name": "exp2_cnn_global_nomask",
-            "flags": ["--model-kind", "cnn", "--pooling-mode", "global_avg", "--no-use-mask-channel", "--no-augmentation"],
+            "name": "exp1_baseline_masked_band_means",
+            "flags": ["--model-kind", "baseline", "--no-augmentation"],
         },
         {
-            "name": "exp6_cnn_masked_mask_aug",
+            "name": "exp2_cnn_global_mask",
+            "flags": ["--model-kind", "cnn", "--pooling-mode", "global_avg", "--use-mask-channel", "--no-augmentation"],
+        },
+        {
+            "name": "exp3_cnn_masked_mask_aug",
             "flags": ["--model-kind", "cnn", "--pooling-mode", "masked_avg", "--use-mask-channel", "--augmentation"],
         },
     ]
@@ -55,7 +59,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--python", default="python")
     p.add_argument("--base-name", default="small_cnn_ablation")
-    p.add_argument("--multi-gpu", choices=["auto", "single", "dp"], default="auto")
+    p.add_argument("--multi-gpu", choices=["auto", "single", "dp"], default="dp")
+    p.add_argument("--require-gpu", action="store_true")
+    p.add_argument("--require-two-gpus", action="store_true")
+    p.add_argument("--fast", action="store_true", help="Use faster settings (fewer folds/epochs, larger batch size).")
     return p.parse_args()
 
 
@@ -63,6 +70,20 @@ def main() -> None:
     args = parse_args()
     repo = Path(__file__).resolve().parents[1]
     train_script = repo / "scripts" / "train_small_masked_cnn.py"
+
+    effective_folds = args.folds
+    effective_max_epochs = args.max_epochs
+    effective_patience = args.early_stopping_patience
+    effective_batch_size = args.batch_size
+    if args.fast:
+        effective_folds = min(args.folds, 3)
+        effective_max_epochs = min(args.max_epochs, 80)
+        effective_patience = min(args.early_stopping_patience, 15)
+        effective_batch_size = max(args.batch_size, 16)
+        print(
+            f"[fast-mode] folds={effective_folds} max_epochs={effective_max_epochs} "
+            f"patience={effective_patience} batch_size={effective_batch_size}"
+        )
 
     grid = _experiment_grid()
     summary_rows: list[dict[str, Any]] = []
@@ -88,7 +109,7 @@ def main() -> None:
         "--patch-size",
         str(args.patch_size),
         "--batch-size",
-        str(args.batch_size),
+        str(effective_batch_size),
         "--num-workers",
         str(args.num_workers),
         "--max-epochs",
@@ -96,7 +117,7 @@ def main() -> None:
         "--early-stopping-patience",
         "1",
         "--folds",
-        str(args.folds),
+        str(effective_folds),
         "--seed",
         str(args.seed),
         "--model-kind",
@@ -105,6 +126,10 @@ def main() -> None:
         "--multi-gpu",
         str(args.multi_gpu),
     ]
+    if args.require_gpu:
+        split_cmd.append("--require-gpu")
+    if args.require_two_gpus:
+        split_cmd.append("--require-two-gpus")
     _run(split_cmd, cwd=repo)
     shared_split = Path(args.output_dir) / split_exp_name / args.resolution / "split_ids.json"
 
@@ -130,19 +155,19 @@ def main() -> None:
             "--patch-size",
             str(args.patch_size),
             "--batch-size",
-            str(args.batch_size),
+            str(effective_batch_size),
             "--num-workers",
             str(args.num_workers),
             "--max-epochs",
-            str(args.max_epochs),
+            str(effective_max_epochs),
             "--learning-rate",
             str(args.learning_rate),
             "--weight-decay",
             str(args.weight_decay),
             "--early-stopping-patience",
-            str(args.early_stopping_patience),
+            str(effective_patience),
             "--folds",
-            str(args.folds),
+            str(effective_folds),
             "--seed",
             str(args.seed),
             "--split-ids-path",
@@ -150,6 +175,10 @@ def main() -> None:
             "--multi-gpu",
             str(args.multi_gpu),
         ] + exp["flags"]
+        if args.require_gpu:
+            cmd.append("--require-gpu")
+        if args.require_two_gpus:
+            cmd.append("--require-two-gpus")
 
         _run(cmd, cwd=repo)
 
