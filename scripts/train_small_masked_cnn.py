@@ -289,6 +289,17 @@ def get_loss(name: str) -> nn.Module:
     raise ValueError(f"Unsupported loss={name}")
 
 
+def _loader_kwargs(num_workers: int, device: torch.device) -> dict[str, Any]:
+    kwargs: dict[str, Any] = {
+        "num_workers": int(num_workers),
+        "pin_memory": device.type == "cuda",
+    }
+    if num_workers > 0:
+        kwargs["persistent_workers"] = True
+        kwargs["prefetch_factor"] = 4
+    return kwargs
+
+
 def run_epoch(model: nn.Module, loader: DataLoader, optimizer: Optional[torch.optim.Optimizer], loss_fn: nn.Module, device: torch.device) -> tuple[float, np.ndarray, np.ndarray]:
     train_mode = optimizer is not None
     model.train(mode=train_mode)
@@ -298,9 +309,9 @@ def run_epoch(model: nn.Module, loader: DataLoader, optimizer: Optional[torch.op
     y_pred_list: list[np.ndarray] = []
 
     for batch in loader:
-        img = batch["image"].to(device)
-        msk = batch["mask"].to(device)
-        y = batch["target"].to(device)
+        img = batch["image"].to(device, non_blocking=device.type == "cuda")
+        msk = batch["mask"].to(device, non_blocking=device.type == "cuda")
+        y = batch["target"].to(device, non_blocking=device.type == "cuda")
 
         with torch.set_grad_enabled(train_mode):
             pred = model(img, msk)
@@ -324,8 +335,8 @@ def predict_full(model: nn.Module, loader: DataLoader, device: torch.device) -> 
     rows: list[dict[str, Any]] = []
     with torch.inference_mode():
         for batch in loader:
-            img = batch["image"].to(device)
-            msk = batch["mask"].to(device)
+            img = batch["image"].to(device, non_blocking=device.type == "cuda")
+            msk = batch["mask"].to(device, non_blocking=device.type == "cuda")
             pred = model(img, msk).cpu().numpy().reshape(-1)
             y = batch["target"].cpu().numpy().reshape(-1)
             ids = batch["id_plot"]
@@ -506,8 +517,13 @@ def train_one_fold(
     train_ds = FoldDataset(train_raw, mean=mean, std=std, patch_size=cfg.patch_size, augment=cfg.augmentation)
     val_ds = FoldDataset(val_raw, mean=mean, std=std, patch_size=cfg.patch_size, augment=False)
 
-    train_loader = DataLoader(train_ds, batch_size=cfg.batch_size, shuffle=True, num_workers=cfg.num_workers)
-    val_loader = DataLoader(val_ds, batch_size=cfg.batch_size, shuffle=False, num_workers=cfg.num_workers)
+    loader_kwargs = _loader_kwargs(cfg.num_workers, device)
+    train_loader = DataLoader(train_ds, batch_size=cfg.batch_size, shuffle=True, **loader_kwargs)
+    val_loader = DataLoader(val_ds, batch_size=cfg.batch_size, shuffle=False, **loader_kwargs)
+    print(
+        f"[data] fold={fold_idx:02d} train_samples={len(train_ds)} val_samples={len(val_ds)} "
+        f"batch_size={cfg.batch_size} num_workers={cfg.num_workers} pin_memory={loader_kwargs['pin_memory']}"
+    )
 
     if cfg.model_kind == "baseline":
         baseline_rows = run_baselines(train_loader, val_loader, fold_dir=fold_dir, seed=cfg.seed + fold_idx)
@@ -528,20 +544,32 @@ def train_one_fold(
         )
     ).to(device)
 
-    use_data_parallel = (
-        cfg.multi_gpu in {"auto", "dp"}
+    auto_multi_gpu = (
+        cfg.multi_gpu == "auto"
         and device.type == "cuda"
         and torch.cuda.device_count() >= 2
+        and cfg.batch_size >= 32
+        and len(train_ds) >= 128
+    )
+    use_data_parallel = (
+        device.type == "cuda"
+        and torch.cuda.device_count() >= 2
+        and (cfg.multi_gpu == "dp" or auto_multi_gpu)
     )
     model: nn.Module = nn.DataParallel(base_model) if use_data_parallel else base_model
     if use_data_parallel:
         print(f"[multi-gpu] Using DataParallel on {torch.cuda.device_count()} GPUs")
     else:
+        if cfg.multi_gpu == "auto" and device.type == "cuda" and torch.cuda.device_count() >= 2:
+            print(
+                f"[multi-gpu] Auto-selected single GPU because batch_size={cfg.batch_size} "
+                f"and train_samples={len(train_ds)} are too small to benefit from DataParallel"
+            )
         print(f"[multi-gpu] Running on device={device}")
 
     loss_fn = get_loss(cfg.loss_name)
     opt = AdamW(model.parameters(), lr=cfg.learning_rate, weight_decay=cfg.weight_decay)
-    scheduler = ReduceLROnPlateau(opt, mode="min", factor=0.5, patience=10)
+    scheduler = ReduceLROnPlateau(opt, mode="min", factor=0.5, patience=max(2, cfg.early_stopping_patience // 2))
 
     history: list[dict[str, Any]] = []
     best_value = float("inf")
@@ -715,12 +743,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--shapefile-path", type=Path, default=REPO_ROOT / "data" / "shapefiles" / "2020_SEPIM.shp")
     p.add_argument("--mask-buffer-m", type=float, default=-20.0)
     p.add_argument("--patch-size", type=int, default=128)
-    p.add_argument("--batch-size", type=int, default=8)
-    p.add_argument("--num-workers", type=int, default=0)
-    p.add_argument("--max-epochs", type=int, default=200)
+    p.add_argument("--batch-size", type=int, default=32)
+    p.add_argument("--num-workers", type=int, default=4)
+    p.add_argument("--max-epochs", type=int, default=40)
     p.add_argument("--learning-rate", type=float, default=1e-3)
     p.add_argument("--weight-decay", type=float, default=1e-4)
-    p.add_argument("--early-stopping-patience", type=int, default=30)
+    p.add_argument("--early-stopping-patience", type=int, default=8)
     p.add_argument("--folds", type=int, default=5)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--split-ids-path", type=Path, default=None)
@@ -748,6 +776,8 @@ def main() -> None:
 
     cuda_available = torch.cuda.is_available()
     gpu_count = int(torch.cuda.device_count()) if cuda_available else 0
+    if cuda_available:
+        torch.backends.cudnn.benchmark = True
     print(
         f"[env] torch={torch.__version__} cuda_available={cuda_available} "
         f"gpu_count={gpu_count} multi_gpu={args.multi_gpu}"
