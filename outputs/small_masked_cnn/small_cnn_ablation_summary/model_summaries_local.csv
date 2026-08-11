@@ -1,0 +1,354 @@
+experiment_name,model_kind,pooling_mode,use_mask_channel,loss,total_params,trainable_params,param_size_mb_fp32,architecture
+exp1_baseline_masked_band_means,baseline,n/a,n/a,n/a,0,0,0.0,"Baseline regressors on masked per-band mean features: linear_regression, random_forest, xgboost(if available)."
+exp2_cnn_global_nomask_noaug_huber,cnn,global_avg,False,huber,168705,168705,0.6435585021972656,"SmallMaskedCNNRegressor(
+  (stem): Sequential(
+    (0): Conv2d(10, 24, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+    (1): GroupNorm(8, 24, eps=1e-05, affine=True, bias=True)
+    (2): SiLU(inplace=True)
+  )
+  (res1): ResidualBlock(
+    (conv1): Conv2d(24, 24, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+    (gn1): GroupNorm(8, 24, eps=1e-05, affine=True, bias=True)
+    (act): SiLU(inplace=True)
+    (conv2): Conv2d(24, 24, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+    (gn2): GroupNorm(8, 24, eps=1e-05, affine=True, bias=True)
+  )
+  (down1): DownsampleBlock(
+    (conv): Conv2d(24, 48, kernel_size=(3, 3), stride=(2, 2), padding=(1, 1), bias=False)
+    (gn): GroupNorm(8, 48, eps=1e-05, affine=True, bias=True)
+    (act): SiLU(inplace=True)
+  )
+  (res2): ResidualBlock(
+    (conv1): Conv2d(48, 48, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+    (gn1): GroupNorm(8, 48, eps=1e-05, affine=True, bias=True)
+    (act): SiLU(inplace=True)
+    (conv2): Conv2d(48, 48, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+    (gn2): GroupNorm(8, 48, eps=1e-05, affine=True, bias=True)
+  )
+  (down2): DownsampleBlock(
+    (conv): Conv2d(48, 64, kernel_size=(3, 3), stride=(2, 2), padding=(1, 1), bias=False)
+    (gn): GroupNorm(8, 64, eps=1e-05, affine=True, bias=True)
+    (act): SiLU(inplace=True)
+  )
+  (res3): ResidualBlock(
+    (conv1): Conv2d(64, 64, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+    (gn1): GroupNorm(8, 64, eps=1e-05, affine=True, bias=True)
+    (act): SiLU(inplace=True)
+    (conv2): Conv2d(64, 64, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+    (gn2): GroupNorm(8, 64, eps=1e-05, affine=True, bias=True)
+  )
+  (head): Sequential(
+    (0): Linear(in_features=65, out_features=32, bias=True)
+    (1): SiLU(inplace=True)
+    (2): Dropout(p=0.2, inplace=False)
+    (3): Linear(in_features=32, out_features=1, bias=True)
+  )
+)"
+exp3_cnn_global_mask_noaug_huber,cnn,global_avg,True,huber,168921,168921,0.6443824768066406,"SmallMaskedCNNRegressor(
+  (stem): Sequential(
+    (0): Conv2d(11, 24, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+    (1): GroupNorm(8, 24, eps=1e-05, affine=True, bias=True)
+    (2): SiLU(inplace=True)
+  )
+  (res1): ResidualBlock(
+    (conv1): Conv2d(24, 24, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+    (gn1): GroupNorm(8, 24, eps=1e-05, affine=True, bias=True)
+    (act): SiLU(inplace=True)
+    (conv2): Conv2d(24, 24, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+    (gn2): GroupNorm(8, 24, eps=1e-05, affine=True, bias=True)
+  )
+  (down1): DownsampleBlock(
+    (conv): Conv2d(24, 48, kernel_size=(3, 3), stride=(2, 2), padding=(1, 1), bias=False)
+    (gn): GroupNorm(8, 48, eps=1e-05, affine=True, bias=True)
+    (act): SiLU(inplace=True)
+  )
+  (res2): ResidualBlock(
+    (conv1): Conv2d(48, 48, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+    (gn1): GroupNorm(8, 48, eps=1e-05, affine=True, bias=True)
+    (act): SiLU(inplace=True)
+    (conv2): Conv2d(48, 48, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+    (gn2): GroupNorm(8, 48, eps=1e-05, affine=True, bias=True)
+  )
+  (down2): DownsampleBlock(
+    (conv): Conv2d(48, 64, kernel_size=(3, 3), stride=(2, 2), padding=(1, 1), bias=False)
+    (gn): GroupNorm(8, 64, eps=1e-05, affine=True, bias=True)
+    (act): SiLU(inplace=True)
+  )
+  (res3): ResidualBlock(
+    (conv1): Conv2d(64, 64, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+    (gn1): GroupNorm(8, 64, eps=1e-05, affine=True, bias=True)
+    (act): SiLU(inplace=True)
+    (conv2): Conv2d(64, 64, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+    (gn2): GroupNorm(8, 64, eps=1e-05, affine=True, bias=True)
+  )
+  (head): Sequential(
+    (0): Linear(in_features=65, out_features=32, bias=True)
+    (1): SiLU(inplace=True)
+    (2): Dropout(p=0.2, inplace=False)
+    (3): Linear(in_features=32, out_features=1, bias=True)
+  )
+)"
+exp4_cnn_masked_nomask_noaug_huber,cnn,masked_avg,False,huber,168705,168705,0.6435585021972656,"SmallMaskedCNNRegressor(
+  (stem): Sequential(
+    (0): Conv2d(10, 24, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+    (1): GroupNorm(8, 24, eps=1e-05, affine=True, bias=True)
+    (2): SiLU(inplace=True)
+  )
+  (res1): ResidualBlock(
+    (conv1): Conv2d(24, 24, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+    (gn1): GroupNorm(8, 24, eps=1e-05, affine=True, bias=True)
+    (act): SiLU(inplace=True)
+    (conv2): Conv2d(24, 24, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+    (gn2): GroupNorm(8, 24, eps=1e-05, affine=True, bias=True)
+  )
+  (down1): DownsampleBlock(
+    (conv): Conv2d(24, 48, kernel_size=(3, 3), stride=(2, 2), padding=(1, 1), bias=False)
+    (gn): GroupNorm(8, 48, eps=1e-05, affine=True, bias=True)
+    (act): SiLU(inplace=True)
+  )
+  (res2): ResidualBlock(
+    (conv1): Conv2d(48, 48, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+    (gn1): GroupNorm(8, 48, eps=1e-05, affine=True, bias=True)
+    (act): SiLU(inplace=True)
+    (conv2): Conv2d(48, 48, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+    (gn2): GroupNorm(8, 48, eps=1e-05, affine=True, bias=True)
+  )
+  (down2): DownsampleBlock(
+    (conv): Conv2d(48, 64, kernel_size=(3, 3), stride=(2, 2), padding=(1, 1), bias=False)
+    (gn): GroupNorm(8, 64, eps=1e-05, affine=True, bias=True)
+    (act): SiLU(inplace=True)
+  )
+  (res3): ResidualBlock(
+    (conv1): Conv2d(64, 64, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+    (gn1): GroupNorm(8, 64, eps=1e-05, affine=True, bias=True)
+    (act): SiLU(inplace=True)
+    (conv2): Conv2d(64, 64, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+    (gn2): GroupNorm(8, 64, eps=1e-05, affine=True, bias=True)
+  )
+  (head): Sequential(
+    (0): Linear(in_features=65, out_features=32, bias=True)
+    (1): SiLU(inplace=True)
+    (2): Dropout(p=0.2, inplace=False)
+    (3): Linear(in_features=32, out_features=1, bias=True)
+  )
+)"
+exp5_cnn_masked_mask_noaug_huber,cnn,masked_avg,True,huber,168921,168921,0.6443824768066406,"SmallMaskedCNNRegressor(
+  (stem): Sequential(
+    (0): Conv2d(11, 24, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+    (1): GroupNorm(8, 24, eps=1e-05, affine=True, bias=True)
+    (2): SiLU(inplace=True)
+  )
+  (res1): ResidualBlock(
+    (conv1): Conv2d(24, 24, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+    (gn1): GroupNorm(8, 24, eps=1e-05, affine=True, bias=True)
+    (act): SiLU(inplace=True)
+    (conv2): Conv2d(24, 24, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+    (gn2): GroupNorm(8, 24, eps=1e-05, affine=True, bias=True)
+  )
+  (down1): DownsampleBlock(
+    (conv): Conv2d(24, 48, kernel_size=(3, 3), stride=(2, 2), padding=(1, 1), bias=False)
+    (gn): GroupNorm(8, 48, eps=1e-05, affine=True, bias=True)
+    (act): SiLU(inplace=True)
+  )
+  (res2): ResidualBlock(
+    (conv1): Conv2d(48, 48, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+    (gn1): GroupNorm(8, 48, eps=1e-05, affine=True, bias=True)
+    (act): SiLU(inplace=True)
+    (conv2): Conv2d(48, 48, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+    (gn2): GroupNorm(8, 48, eps=1e-05, affine=True, bias=True)
+  )
+  (down2): DownsampleBlock(
+    (conv): Conv2d(48, 64, kernel_size=(3, 3), stride=(2, 2), padding=(1, 1), bias=False)
+    (gn): GroupNorm(8, 64, eps=1e-05, affine=True, bias=True)
+    (act): SiLU(inplace=True)
+  )
+  (res3): ResidualBlock(
+    (conv1): Conv2d(64, 64, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+    (gn1): GroupNorm(8, 64, eps=1e-05, affine=True, bias=True)
+    (act): SiLU(inplace=True)
+    (conv2): Conv2d(64, 64, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+    (gn2): GroupNorm(8, 64, eps=1e-05, affine=True, bias=True)
+  )
+  (head): Sequential(
+    (0): Linear(in_features=65, out_features=32, bias=True)
+    (1): SiLU(inplace=True)
+    (2): Dropout(p=0.2, inplace=False)
+    (3): Linear(in_features=32, out_features=1, bias=True)
+  )
+)"
+exp6_cnn_masked_mask_aug_huber,cnn,masked_avg,True,huber,168921,168921,0.6443824768066406,"SmallMaskedCNNRegressor(
+  (stem): Sequential(
+    (0): Conv2d(11, 24, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+    (1): GroupNorm(8, 24, eps=1e-05, affine=True, bias=True)
+    (2): SiLU(inplace=True)
+  )
+  (res1): ResidualBlock(
+    (conv1): Conv2d(24, 24, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+    (gn1): GroupNorm(8, 24, eps=1e-05, affine=True, bias=True)
+    (act): SiLU(inplace=True)
+    (conv2): Conv2d(24, 24, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+    (gn2): GroupNorm(8, 24, eps=1e-05, affine=True, bias=True)
+  )
+  (down1): DownsampleBlock(
+    (conv): Conv2d(24, 48, kernel_size=(3, 3), stride=(2, 2), padding=(1, 1), bias=False)
+    (gn): GroupNorm(8, 48, eps=1e-05, affine=True, bias=True)
+    (act): SiLU(inplace=True)
+  )
+  (res2): ResidualBlock(
+    (conv1): Conv2d(48, 48, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+    (gn1): GroupNorm(8, 48, eps=1e-05, affine=True, bias=True)
+    (act): SiLU(inplace=True)
+    (conv2): Conv2d(48, 48, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+    (gn2): GroupNorm(8, 48, eps=1e-05, affine=True, bias=True)
+  )
+  (down2): DownsampleBlock(
+    (conv): Conv2d(48, 64, kernel_size=(3, 3), stride=(2, 2), padding=(1, 1), bias=False)
+    (gn): GroupNorm(8, 64, eps=1e-05, affine=True, bias=True)
+    (act): SiLU(inplace=True)
+  )
+  (res3): ResidualBlock(
+    (conv1): Conv2d(64, 64, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+    (gn1): GroupNorm(8, 64, eps=1e-05, affine=True, bias=True)
+    (act): SiLU(inplace=True)
+    (conv2): Conv2d(64, 64, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+    (gn2): GroupNorm(8, 64, eps=1e-05, affine=True, bias=True)
+  )
+  (head): Sequential(
+    (0): Linear(in_features=65, out_features=32, bias=True)
+    (1): SiLU(inplace=True)
+    (2): Dropout(p=0.2, inplace=False)
+    (3): Linear(in_features=32, out_features=1, bias=True)
+  )
+)"
+exp7_cnn_global_mask_aug_huber,cnn,global_avg,True,huber,168921,168921,0.6443824768066406,"SmallMaskedCNNRegressor(
+  (stem): Sequential(
+    (0): Conv2d(11, 24, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+    (1): GroupNorm(8, 24, eps=1e-05, affine=True, bias=True)
+    (2): SiLU(inplace=True)
+  )
+  (res1): ResidualBlock(
+    (conv1): Conv2d(24, 24, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+    (gn1): GroupNorm(8, 24, eps=1e-05, affine=True, bias=True)
+    (act): SiLU(inplace=True)
+    (conv2): Conv2d(24, 24, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+    (gn2): GroupNorm(8, 24, eps=1e-05, affine=True, bias=True)
+  )
+  (down1): DownsampleBlock(
+    (conv): Conv2d(24, 48, kernel_size=(3, 3), stride=(2, 2), padding=(1, 1), bias=False)
+    (gn): GroupNorm(8, 48, eps=1e-05, affine=True, bias=True)
+    (act): SiLU(inplace=True)
+  )
+  (res2): ResidualBlock(
+    (conv1): Conv2d(48, 48, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+    (gn1): GroupNorm(8, 48, eps=1e-05, affine=True, bias=True)
+    (act): SiLU(inplace=True)
+    (conv2): Conv2d(48, 48, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+    (gn2): GroupNorm(8, 48, eps=1e-05, affine=True, bias=True)
+  )
+  (down2): DownsampleBlock(
+    (conv): Conv2d(48, 64, kernel_size=(3, 3), stride=(2, 2), padding=(1, 1), bias=False)
+    (gn): GroupNorm(8, 64, eps=1e-05, affine=True, bias=True)
+    (act): SiLU(inplace=True)
+  )
+  (res3): ResidualBlock(
+    (conv1): Conv2d(64, 64, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+    (gn1): GroupNorm(8, 64, eps=1e-05, affine=True, bias=True)
+    (act): SiLU(inplace=True)
+    (conv2): Conv2d(64, 64, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+    (gn2): GroupNorm(8, 64, eps=1e-05, affine=True, bias=True)
+  )
+  (head): Sequential(
+    (0): Linear(in_features=65, out_features=32, bias=True)
+    (1): SiLU(inplace=True)
+    (2): Dropout(p=0.2, inplace=False)
+    (3): Linear(in_features=32, out_features=1, bias=True)
+  )
+)"
+exp8_cnn_masked_mask_aug_mse,cnn,masked_avg,True,mse,168921,168921,0.6443824768066406,"SmallMaskedCNNRegressor(
+  (stem): Sequential(
+    (0): Conv2d(11, 24, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+    (1): GroupNorm(8, 24, eps=1e-05, affine=True, bias=True)
+    (2): SiLU(inplace=True)
+  )
+  (res1): ResidualBlock(
+    (conv1): Conv2d(24, 24, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+    (gn1): GroupNorm(8, 24, eps=1e-05, affine=True, bias=True)
+    (act): SiLU(inplace=True)
+    (conv2): Conv2d(24, 24, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+    (gn2): GroupNorm(8, 24, eps=1e-05, affine=True, bias=True)
+  )
+  (down1): DownsampleBlock(
+    (conv): Conv2d(24, 48, kernel_size=(3, 3), stride=(2, 2), padding=(1, 1), bias=False)
+    (gn): GroupNorm(8, 48, eps=1e-05, affine=True, bias=True)
+    (act): SiLU(inplace=True)
+  )
+  (res2): ResidualBlock(
+    (conv1): Conv2d(48, 48, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+    (gn1): GroupNorm(8, 48, eps=1e-05, affine=True, bias=True)
+    (act): SiLU(inplace=True)
+    (conv2): Conv2d(48, 48, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+    (gn2): GroupNorm(8, 48, eps=1e-05, affine=True, bias=True)
+  )
+  (down2): DownsampleBlock(
+    (conv): Conv2d(48, 64, kernel_size=(3, 3), stride=(2, 2), padding=(1, 1), bias=False)
+    (gn): GroupNorm(8, 64, eps=1e-05, affine=True, bias=True)
+    (act): SiLU(inplace=True)
+  )
+  (res3): ResidualBlock(
+    (conv1): Conv2d(64, 64, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+    (gn1): GroupNorm(8, 64, eps=1e-05, affine=True, bias=True)
+    (act): SiLU(inplace=True)
+    (conv2): Conv2d(64, 64, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+    (gn2): GroupNorm(8, 64, eps=1e-05, affine=True, bias=True)
+  )
+  (head): Sequential(
+    (0): Linear(in_features=65, out_features=32, bias=True)
+    (1): SiLU(inplace=True)
+    (2): Dropout(p=0.2, inplace=False)
+    (3): Linear(in_features=32, out_features=1, bias=True)
+  )
+)"
+exp9_cnn_masked_mask_aug_mae,cnn,masked_avg,True,mae,168921,168921,0.6443824768066406,"SmallMaskedCNNRegressor(
+  (stem): Sequential(
+    (0): Conv2d(11, 24, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+    (1): GroupNorm(8, 24, eps=1e-05, affine=True, bias=True)
+    (2): SiLU(inplace=True)
+  )
+  (res1): ResidualBlock(
+    (conv1): Conv2d(24, 24, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+    (gn1): GroupNorm(8, 24, eps=1e-05, affine=True, bias=True)
+    (act): SiLU(inplace=True)
+    (conv2): Conv2d(24, 24, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+    (gn2): GroupNorm(8, 24, eps=1e-05, affine=True, bias=True)
+  )
+  (down1): DownsampleBlock(
+    (conv): Conv2d(24, 48, kernel_size=(3, 3), stride=(2, 2), padding=(1, 1), bias=False)
+    (gn): GroupNorm(8, 48, eps=1e-05, affine=True, bias=True)
+    (act): SiLU(inplace=True)
+  )
+  (res2): ResidualBlock(
+    (conv1): Conv2d(48, 48, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+    (gn1): GroupNorm(8, 48, eps=1e-05, affine=True, bias=True)
+    (act): SiLU(inplace=True)
+    (conv2): Conv2d(48, 48, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+    (gn2): GroupNorm(8, 48, eps=1e-05, affine=True, bias=True)
+  )
+  (down2): DownsampleBlock(
+    (conv): Conv2d(48, 64, kernel_size=(3, 3), stride=(2, 2), padding=(1, 1), bias=False)
+    (gn): GroupNorm(8, 64, eps=1e-05, affine=True, bias=True)
+    (act): SiLU(inplace=True)
+  )
+  (res3): ResidualBlock(
+    (conv1): Conv2d(64, 64, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+    (gn1): GroupNorm(8, 64, eps=1e-05, affine=True, bias=True)
+    (act): SiLU(inplace=True)
+    (conv2): Conv2d(64, 64, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+    (gn2): GroupNorm(8, 64, eps=1e-05, affine=True, bias=True)
+  )
+  (head): Sequential(
+    (0): Linear(in_features=65, out_features=32, bias=True)
+    (1): SiLU(inplace=True)
+    (2): Dropout(p=0.2, inplace=False)
+    (3): Linear(in_features=32, out_features=1, bias=True)
+  )
+)"

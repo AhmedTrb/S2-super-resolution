@@ -56,12 +56,39 @@ def _export_experiment_fold_evolution(exp_dir: Path, exp_name: str, resolution: 
     }
 
 
-def _experiment_grid() -> list[dict[str, Any]]:
-    return [
+def _experiment_grid(resolution: str) -> list[dict[str, Any]]:
+    common = [
         {
             "name": "exp1_baseline_masked_band_means",
             "flags": ["--model-kind", "baseline", "--no-augmentation"],
         },
+        {
+            "name": "exp5_cnn_masked_mask_noaug_huber",
+            "flags": ["--model-kind", "cnn", "--pooling-mode", "masked_avg", "--use-mask-channel", "--no-augmentation", "--loss", "huber"],
+        },
+        {
+            "name": "exp6_cnn_masked_mask_aug_huber",
+            "flags": ["--model-kind", "cnn", "--pooling-mode", "masked_avg", "--use-mask-channel", "--augmentation", "--loss", "huber"],
+        },
+        {
+            "name": "exp8_cnn_masked_mask_aug_mse",
+            "flags": ["--model-kind", "cnn", "--pooling-mode", "masked_avg", "--use-mask-channel", "--augmentation", "--loss", "mse"],
+        },
+        {
+            "name": "exp9_cnn_masked_mask_aug_mae",
+            "flags": ["--model-kind", "cnn", "--pooling-mode", "masked_avg", "--use-mask-channel", "--augmentation", "--loss", "mae"],
+        },
+    ]
+
+    if resolution == "sr":
+        # SR is the expensive pass. Keep only the strongest masked-pooling variants from LR
+        # and drop weak global/no-mask configs to get faster results.
+        return common
+
+    return [
+        *common,
+        # Lower-value experiments retained for LR exploration only.
+        # Commented as weak on the latest ranking, so they are excluded from SR.
         {
             "name": "exp2_cnn_global_nomask_noaug_huber",
             "flags": ["--model-kind", "cnn", "--pooling-mode", "global_avg", "--no-use-mask-channel", "--no-augmentation", "--loss", "huber"],
@@ -75,24 +102,8 @@ def _experiment_grid() -> list[dict[str, Any]]:
             "flags": ["--model-kind", "cnn", "--pooling-mode", "masked_avg", "--no-use-mask-channel", "--no-augmentation", "--loss", "huber"],
         },
         {
-            "name": "exp5_cnn_masked_mask_noaug_huber",
-            "flags": ["--model-kind", "cnn", "--pooling-mode", "masked_avg", "--use-mask-channel", "--no-augmentation", "--loss", "huber"],
-        },
-        {
-            "name": "exp6_cnn_masked_mask_aug_huber",
-            "flags": ["--model-kind", "cnn", "--pooling-mode", "masked_avg", "--use-mask-channel", "--augmentation", "--loss", "huber"],
-        },
-        {
             "name": "exp7_cnn_global_mask_aug_huber",
             "flags": ["--model-kind", "cnn", "--pooling-mode", "global_avg", "--use-mask-channel", "--augmentation", "--loss", "huber"],
-        },
-        {
-            "name": "exp8_cnn_masked_mask_aug_mse",
-            "flags": ["--model-kind", "cnn", "--pooling-mode", "masked_avg", "--use-mask-channel", "--augmentation", "--loss", "mse"],
-        },
-        {
-            "name": "exp9_cnn_masked_mask_aug_mae",
-            "flags": ["--model-kind", "cnn", "--pooling-mode", "masked_avg", "--use-mask-channel", "--augmentation", "--loss", "mae"],
         },
     ]
 
@@ -142,7 +153,7 @@ def main() -> None:
             f"patience={effective_patience} batch_size={effective_batch_size}"
         )
 
-    grid = _experiment_grid()
+    grid = _experiment_grid(args.resolution)
     summary_rows: list[dict[str, Any]] = []
 
     split_exp_name = f"{args.base_name}_shared_split"
