@@ -9,6 +9,8 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+import pandas as pd
+
 
 def _run(cmd: list[str], cwd: Path) -> None:
     print("\n$ " + " ".join(shlex.quote(x) for x in cmd))
@@ -21,6 +23,37 @@ def _load_metrics(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {}
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _export_experiment_fold_evolution(exp_dir: Path, exp_name: str, resolution: str) -> dict[str, Any]:
+    """Collect per-fold epoch histories into one CSV for downstream plotting."""
+    fold_dirs = sorted(path for path in exp_dir.glob("fold_*") if path.is_dir())
+    rows: list[pd.DataFrame] = []
+
+    for fold_dir in fold_dirs:
+        fold_label = fold_dir.name
+        history_path = fold_dir / "history.csv"
+        if history_path.exists():
+            hist = pd.read_csv(history_path)
+            hist.insert(0, "fold", fold_label)
+            hist.insert(0, "resolution", resolution)
+            hist.insert(0, "experiment_name", exp_name)
+            rows.append(hist)
+
+    if not rows:
+        # Baseline-only runs do not have epoch history; return lightweight metadata.
+        return {
+            "history_rows": 0,
+            "history_path": None,
+        }
+
+    merged = pd.concat(rows, ignore_index=True)
+    out_path = exp_dir / "history_all_folds.csv"
+    merged.to_csv(out_path, index=False)
+    return {
+        "history_rows": int(len(merged)),
+        "history_path": str(out_path),
+    }
 
 
 def _experiment_grid() -> list[dict[str, Any]]:
@@ -159,6 +192,7 @@ def main() -> None:
 
     for exp in grid:
         exp_name = f"{args.base_name}_{exp['name']}"
+        exp_dir = Path(args.output_dir) / exp_name / args.resolution
         cmd = [
             args.python,
             str(train_script),
@@ -206,7 +240,9 @@ def main() -> None:
 
         _run(cmd, cwd=repo)
 
-        metrics_path = Path(args.output_dir) / exp_name / args.resolution / "metrics.json"
+        history_meta = _export_experiment_fold_evolution(exp_dir=exp_dir, exp_name=exp_name, resolution=args.resolution)
+
+        metrics_path = exp_dir / "metrics.json"
         metrics = _load_metrics(metrics_path)
         agg = metrics.get("aggregate", {})
 
@@ -222,6 +258,8 @@ def main() -> None:
                 "val_R2_std": agg.get("val_R2", {}).get("std"),
                 "val_Spearman_mean": agg.get("val_Spearman", {}).get("mean"),
                 "val_Spearman_std": agg.get("val_Spearman", {}).get("std"),
+                "history_rows": history_meta["history_rows"],
+                "history_path": history_meta["history_path"],
             }
         )
 
@@ -229,6 +267,20 @@ def main() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     summary_path = out_dir / f"summary_{args.resolution}.json"
     summary_path.write_text(json.dumps(summary_rows, indent=2), encoding="utf-8")
+
+    # Also save a single CSV with all experiment fold-evolution rows for plotting later.
+    combined_rows: list[pd.DataFrame] = []
+    for row in summary_rows:
+        history_path = row.get("history_path")
+        if not history_path:
+            continue
+        path = Path(history_path)
+        if path.exists():
+            combined_rows.append(pd.read_csv(path))
+    if combined_rows:
+        combined_df = pd.concat(combined_rows, ignore_index=True)
+        combined_df.to_csv(out_dir / f"history_all_experiments_{args.resolution}.csv", index=False)
+
     print(json.dumps(summary_rows, indent=2))
 
 
