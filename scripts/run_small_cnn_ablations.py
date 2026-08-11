@@ -30,12 +30,36 @@ def _experiment_grid() -> list[dict[str, Any]]:
             "flags": ["--model-kind", "baseline", "--no-augmentation"],
         },
         {
-            "name": "exp2_cnn_global_mask",
-            "flags": ["--model-kind", "cnn", "--pooling-mode", "global_avg", "--use-mask-channel", "--no-augmentation"],
+            "name": "exp2_cnn_global_nomask_noaug_huber",
+            "flags": ["--model-kind", "cnn", "--pooling-mode", "global_avg", "--no-use-mask-channel", "--no-augmentation", "--loss", "huber"],
         },
         {
-            "name": "exp3_cnn_masked_mask_aug",
-            "flags": ["--model-kind", "cnn", "--pooling-mode", "masked_avg", "--use-mask-channel", "--augmentation"],
+            "name": "exp3_cnn_global_mask_noaug_huber",
+            "flags": ["--model-kind", "cnn", "--pooling-mode", "global_avg", "--use-mask-channel", "--no-augmentation", "--loss", "huber"],
+        },
+        {
+            "name": "exp4_cnn_masked_nomask_noaug_huber",
+            "flags": ["--model-kind", "cnn", "--pooling-mode", "masked_avg", "--no-use-mask-channel", "--no-augmentation", "--loss", "huber"],
+        },
+        {
+            "name": "exp5_cnn_masked_mask_noaug_huber",
+            "flags": ["--model-kind", "cnn", "--pooling-mode", "masked_avg", "--use-mask-channel", "--no-augmentation", "--loss", "huber"],
+        },
+        {
+            "name": "exp6_cnn_masked_mask_aug_huber",
+            "flags": ["--model-kind", "cnn", "--pooling-mode", "masked_avg", "--use-mask-channel", "--augmentation", "--loss", "huber"],
+        },
+        {
+            "name": "exp7_cnn_global_mask_aug_huber",
+            "flags": ["--model-kind", "cnn", "--pooling-mode", "global_avg", "--use-mask-channel", "--augmentation", "--loss", "huber"],
+        },
+        {
+            "name": "exp8_cnn_masked_mask_aug_mse",
+            "flags": ["--model-kind", "cnn", "--pooling-mode", "masked_avg", "--use-mask-channel", "--augmentation", "--loss", "mse"],
+        },
+        {
+            "name": "exp9_cnn_masked_mask_aug_mae",
+            "flags": ["--model-kind", "cnn", "--pooling-mode", "masked_avg", "--use-mask-channel", "--augmentation", "--loss", "mae"],
         },
     ]
 
