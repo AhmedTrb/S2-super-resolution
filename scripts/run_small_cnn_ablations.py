@@ -58,10 +58,10 @@ def _export_experiment_fold_evolution(exp_dir: Path, exp_name: str, resolution: 
 
 def _experiment_grid(resolution: str) -> list[dict[str, Any]]:
     common = [
-        {
-            "name": "exp1_baseline_masked_band_means",
-            "flags": ["--model-kind", "baseline", "--no-augmentation"],
-        },
+        # {
+        #     "name": "exp1_baseline_masked_band_means",
+        #     "flags": ["--model-kind", "baseline", "--no-augmentation"],
+        # },
         {
             "name": "exp5_cnn_masked_mask_noaug_huber",
             "flags": ["--model-kind", "cnn", "--pooling-mode", "masked_avg", "--use-mask-channel", "--no-augmentation", "--loss", "huber"],
