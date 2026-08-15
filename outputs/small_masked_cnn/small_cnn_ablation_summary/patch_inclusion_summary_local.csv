@@ -1,3 +1,3 @@
 resolution,checked_samples,non_empty_full_masks,empty_full_masks,crop_contains_parcel_count,crop_missed_parcel_count,crop_contains_parcel_rate_percent,median_crop_coverage_ratio
 lr,300,300,0,300,0,100.0,1.0
-sr,300,300,0,300,0,100.0,0.6069721779720668
+sr,300,300,0,300,0,100.0,1.0

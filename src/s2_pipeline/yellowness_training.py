@@ -71,6 +71,61 @@ def _resolve_first(columns: Iterable[str], options: Sequence[str]) -> Optional[s
     return next((name for name in options if name in columns), None)
 
 
+def _safe_divide(numerator: np.ndarray, denominator: np.ndarray, eps: float = 1e-6) -> np.ndarray:
+    """Elementwise division that avoids NaN/Inf: entries with |denominator| <= eps are set to 0."""
+    result = np.zeros_like(numerator, dtype=np.float32)
+    valid = np.abs(denominator) > eps
+    result[valid] = numerator[valid] / denominator[valid]
+    return np.nan_to_num(result, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
+
+
+def _rgb_to_hue_saturation(r: np.ndarray, g: np.ndarray, b: np.ndarray, eps: float = 1e-6) -> tuple[np.ndarray, np.ndarray]:
+    """Standard HSV hue/saturation from normalized reflectance triplets; hue is returned normalized to [0, 1]."""
+    cmax = np.maximum(np.maximum(r, g), b)
+    cmin = np.minimum(np.minimum(r, g), b)
+    delta = cmax - cmin
+
+    saturation = _safe_divide(delta, cmax, eps=eps)
+
+    delta_safe = np.where(np.abs(delta) > eps, delta, eps)
+    is_r_max = (cmax == r) & (delta > eps)
+    is_g_max = (cmax == g) & (delta > eps) & ~is_r_max
+    is_b_max = (cmax == b) & (delta > eps) & ~is_r_max & ~is_g_max
+
+    hue = np.zeros_like(cmax, dtype=np.float32)
+    hue = np.where(is_r_max, 60.0 * (((g - b) / delta_safe) % 6.0), hue)
+    hue = np.where(is_g_max, 60.0 * (((b - r) / delta_safe) + 2.0), hue)
+    hue = np.where(is_b_max, 60.0 * (((r - g) / delta_safe) + 4.0), hue)
+    hue = np.mod(hue, 360.0)
+
+    hue_norm = np.nan_to_num((hue / 360.0).astype(np.float32), nan=0.0, posinf=0.0, neginf=0.0)
+    saturation = np.nan_to_num(saturation.astype(np.float32), nan=0.0, posinf=0.0, neginf=0.0)
+    return hue_norm, saturation
+
+
+def _compute_paper_indices(image: np.ndarray) -> np.ndarray:
+    """Compute [B2, B3, B4, H, S, GLI, OSAVI, NDRE] from a normalized 10-band L2A image."""
+    if image.shape[0] < 8:
+        raise ValueError(
+            "paper_indices recipe requires bands B02..B8A in standard order "
+            f"{EXPECTED_S2_BAND_ORDER[:8]}, got shape={image.shape}."
+        )
+
+    b2, b3, b4, b5 = image[0], image[1], image[2], image[3]
+    b8 = image[6]
+
+    r, g, b = b4, b3, b2
+    nir, red_edge = b8, b5
+
+    hue, saturation = _rgb_to_hue_saturation(r, g, b)
+    gli = _safe_divide(2.0 * g - r - b, 2.0 * g + r + b)
+    osavi = _safe_divide(nir - r, nir + r + 0.16)
+    ndre = _safe_divide(nir - red_edge, nir + red_edge)
+
+    stacked = np.stack([b2, b3, b4, hue, saturation, gli, osavi, ndre], axis=0).astype(np.float32)
+    return np.nan_to_num(stacked, nan=0.0, posinf=0.0, neginf=0.0)
+
+
 def _extract_plot_ids_from_path(value: Any) -> list[str]:
     text = str(value).strip().replace("\\", "/")
     if not text or text.lower() == "nan":
@@ -177,6 +232,11 @@ class ParcelYellownessDataset(Dataset):
             ndvi = (b8 - b4) / np.clip(b8 + b4, 1e-6, None)
             ndvi = np.nan_to_num(ndvi, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
             return np.concatenate([base, ndvi[None, ...]], axis=0)
+
+        if self.band_recipe in ("paper_indices", "raw10"):
+            if self.band_recipe == "raw10":
+                return image
+            return _compute_paper_indices(image)
 
         raise ValueError(f"Unsupported band_recipe='{self.band_recipe}'.")
 

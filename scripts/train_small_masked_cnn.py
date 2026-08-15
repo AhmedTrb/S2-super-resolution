@@ -462,6 +462,7 @@ class TrainConfig:
     seed: int
     folds: int
     model_kind: str
+    band_recipe: str
     use_mask_channel: bool
     pooling_mode: str
     loss_name: str
@@ -494,13 +495,14 @@ def train_one_fold(
     fold_dir = Path(cfg.output_dir) / cfg.experiment_name / cfg.resolution / f"fold_{fold_idx:02d}"
     fold_dir.mkdir(parents=True, exist_ok=True)
 
+    dataset_band_recipe = None if cfg.band_recipe == "raw10" else cfg.band_recipe
     train_raw = ParcelYellownessDataset(
         cfg.inventory,
         root_dir=cfg.root_dir,
         resolution=cfg.resolution,
         rows=train_rows,
         band_indices=None,
-        band_recipe=None,
+        band_recipe=dataset_band_recipe,
         shapefile_path=cfg.shapefile_path,
         shapefile_buffer_m=cfg.mask_buffer_m,
     )
@@ -510,7 +512,7 @@ def train_one_fold(
         resolution=cfg.resolution,
         rows=val_rows,
         band_indices=None,
-        band_recipe=None,
+        band_recipe=dataset_band_recipe,
         shapefile_path=cfg.shapefile_path,
         shapefile_buffer_m=cfg.mask_buffer_m,
     )
@@ -548,9 +550,10 @@ def train_one_fold(
             "type": "baseline",
         }
 
+    image_channels = 10 if cfg.band_recipe == "raw10" else 8
     base_model = SmallMaskedCNNRegressor(
         SmallMaskedCNNConfig(
-            image_channels=10,
+            image_channels=image_channels,
             use_mask_channel=cfg.use_mask_channel,
             pooling_mode=cfg.pooling_mode,
             dropout=0.2,
@@ -755,6 +758,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--split-ids-path", type=Path, default=None)
 
     p.add_argument("--model-kind", choices=["baseline", "cnn"], default="cnn")
+    p.add_argument("--band-recipe", choices=["raw10", "paper_indices"], default="raw10")
     p.add_argument("--use-mask-channel", dest="use_mask_channel", action="store_true")
     p.add_argument("--no-use-mask-channel", dest="use_mask_channel", action="store_false")
     p.add_argument("--pooling-mode", choices=["global_avg", "masked_avg"], default="masked_avg")
@@ -811,6 +815,7 @@ def main() -> None:
         seed=int(args.seed),
         folds=int(args.folds),
         model_kind=str(args.model_kind),
+        band_recipe=str(args.band_recipe),
         use_mask_channel=bool(args.use_mask_channel),
         pooling_mode=str(args.pooling_mode),
         loss_name=str(args.loss),
