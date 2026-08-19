@@ -19,7 +19,7 @@ class ResidualBlock(nn.Module):
         super().__init__()
         self.conv1 = nn.Conv2d(channels, channels, kernel_size=3, padding=1, bias=False)
         self.gn1 = _group_norm(channels)
-        self.act = nn.SiLU(inplace=True)
+        self.act = nn.ReLU(inplace=True)
         self.conv2 = nn.Conv2d(channels, channels, kernel_size=3, padding=1, bias=False)
         self.gn2 = _group_norm(channels)
 
@@ -39,7 +39,7 @@ class DownsampleBlock(nn.Module):
         super().__init__()
         self.conv = nn.Conv2d(in_ch, out_ch, kernel_size=3, stride=2, padding=1, bias=False)
         self.gn = _group_norm(out_ch)
-        self.act = nn.SiLU(inplace=True)
+        self.act = nn.ReLU(inplace=True)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.act(self.gn(self.conv(x)))
@@ -69,7 +69,7 @@ class SmallMaskedCNNRegressor(nn.Module):
         self.stem = nn.Sequential(
             nn.Conv2d(in_channels, 24, kernel_size=3, padding=1, bias=False),
             _group_norm(24),
-            nn.SiLU(inplace=True),
+            nn.ReLU(inplace=True),
         )
         self.res1 = ResidualBlock(24)
 
@@ -81,7 +81,7 @@ class SmallMaskedCNNRegressor(nn.Module):
 
         self.head = nn.Sequential(
             nn.Linear(65, 32),
-            nn.SiLU(inplace=True),
+            nn.ReLU(inplace=True),
             nn.Dropout(self.config.dropout),
             nn.Linear(32, 1),
         )
