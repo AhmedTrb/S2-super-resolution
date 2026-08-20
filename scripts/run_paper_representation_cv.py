@@ -11,8 +11,16 @@ single train/val split. Data augmentation (flip/rotate) is enabled by default.
     E3: SR + raw10          E4: SR + paper_indices
 
 LR patch size is auto-selected as the smallest of {32, 64, 128} px that fully
-contains the parcel mask (no truncation) for (nearly) all samples; the SR
-patch size is the matching LR size scaled by --sr-scale-factor (default 4).
+contains the parcel mask (no truncation) for (nearly) all samples. The SR
+patch size is fixed at 256px (`--sr-patch-size`) so the parcel reliably fits
+in the SR crop regardless of the chosen LR size.
+
+Use `--mask-channel-variants both` to additionally run every experiment
+without the mask channel (`use_mask_channel=False`) alongside the default
+with-mask-channel run, to see the effect of the mask channel. Use
+`--architecture plain_cnn` to replace the 3 residual blocks with 3 normal
+(non-residual) 2D conv blocks, still followed by masked feature pooling and
+the same regression head.
 """
 
 from __future__ import annotations
@@ -118,6 +126,8 @@ def run_cv_experiment(
     full_df: pd.DataFrame,
     cfg_kwargs: dict[str, Any],
     device: torch.device,
+    use_mask_channel: bool,
+    architecture: str,
 ) -> dict[str, Any]:
     cfg = tcnn.TrainConfig(
         experiment_name=f"paper_cv_{exp_name}",
@@ -125,6 +135,8 @@ def run_cv_experiment(
         band_recipe=band_recipe,
         model_kind="cnn",
         patch_size=int(patch_size),
+        architecture=architecture,
+        use_mask_channel=use_mask_channel,
         **cfg_kwargs,
     )
 
@@ -160,7 +172,13 @@ def run_cv_experiment(
 
     image_channels = CHANNELS_BY_RECIPE[band_recipe]
     param_model = SmallMaskedCNNRegressor(
-        SmallMaskedCNNConfig(image_channels=image_channels, use_mask_channel=cfg.use_mask_channel, pooling_mode=cfg.pooling_mode, dropout=0.2)
+        SmallMaskedCNNConfig(
+            image_channels=image_channels,
+            use_mask_channel=cfg.use_mask_channel,
+            pooling_mode=cfg.pooling_mode,
+            architecture=cfg.architecture,
+            dropout=0.2,
+        )
     )
     total_params = sum(p.numel() for p in param_model.parameters())
     trainable_params = sum(p.numel() for p in param_model.parameters() if p.requires_grad)
@@ -169,6 +187,8 @@ def run_cv_experiment(
         "experiment": exp_name,
         "resolution": resolution,
         "band_recipe": band_recipe,
+        "architecture": architecture,
+        "use_mask_channel": bool(use_mask_channel),
         "patch_size": int(patch_size),
         "folds": len(folds),
         "image_channels": int(image_channels),
@@ -206,7 +226,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--lr-patch-candidates", type=int, nargs="+", default=list(DEFAULT_LR_PATCH_CANDIDATES))
     p.add_argument("--patch-containment-threshold", type=float, default=1.0)
     p.add_argument("--patch-select-max-samples", type=int, default=0, help="0 = check all samples.")
-    p.add_argument("--sr-scale-factor", type=int, default=4)
+    p.add_argument("--sr-patch-size", type=int, default=256, help="Fixed SR patch size in pixels (parcel must fit at SR resolution).")
+    p.add_argument("--architecture", choices=["residual", "plain_cnn"], default="residual")
+    p.add_argument(
+        "--mask-channel-variants", choices=["with", "without", "both"], default="with",
+        help="'with' (default, mask channel on), 'without' (mask channel off), or 'both' to run each experiment twice.",
+    )
     p.add_argument("--multi-gpu", choices=["auto", "single", "dp"], default="auto")
     p.add_argument("--require-gpu", action="store_true")
     return p.parse_args()
@@ -238,10 +263,10 @@ def main() -> None:
             containment_threshold=args.patch_containment_threshold,
             max_samples=args.patch_select_max_samples,
         )
-    sr_patch_size = lr_patch_size * int(args.sr_scale_factor)
+    sr_patch_size = int(args.sr_patch_size)
     patch_report["sr_patch_size"] = sr_patch_size
     (out_root / "patch_size_selection.json").write_text(json.dumps(patch_report, indent=2), encoding="utf-8")
-    print(f"[patch-select] chosen lr_patch_size={lr_patch_size}px -> sr_patch_size={sr_patch_size}px")
+    print(f"[patch-select] chosen lr_patch_size={lr_patch_size}px -> fixed sr_patch_size={sr_patch_size}px")
 
     patch_size_by_resolution = {"lr": lr_patch_size, "sr": sr_patch_size}
 
@@ -263,7 +288,6 @@ def main() -> None:
         early_stopping_patience=int(args.early_stopping_patience),
         seed=int(args.seed),
         folds=int(args.folds),
-        use_mask_channel=True,
         pooling_mode="masked_avg",
         loss_name="huber",
         augmentation=bool(args.augmentation),
@@ -272,21 +296,27 @@ def main() -> None:
         log_jsonl=True,
     )
 
+    mask_channel_options = {"with": [True], "without": [False], "both": [True, False]}[args.mask_channel_variants]
+
     results: list[dict[str, Any]] = []
     for exp in EXPERIMENTS:
         patch_size = patch_size_by_resolution[exp["resolution"]]
-        result = run_cv_experiment(
-            exp_name=exp["name"],
-            resolution=exp["resolution"],
-            band_recipe=exp["band_recipe"],
-            patch_size=patch_size,
-            folds=folds,
-            split_meta=split_meta,
-            full_df=full_df,
-            cfg_kwargs=cfg_kwargs,
-            device=device,
-        )
-        results.append(result)
+        for use_mask_channel in mask_channel_options:
+            exp_name = exp["name"] if len(mask_channel_options) == 1 else f"{exp['name']}_{'mask' if use_mask_channel else 'nomask'}"
+            result = run_cv_experiment(
+                exp_name=exp_name,
+                resolution=exp["resolution"],
+                band_recipe=exp["band_recipe"],
+                patch_size=patch_size,
+                folds=folds,
+                split_meta=split_meta,
+                full_df=full_df,
+                cfg_kwargs=cfg_kwargs,
+                device=device,
+                use_mask_channel=use_mask_channel,
+                architecture=str(args.architecture),
+            )
+            results.append(result)
 
     comparison = pd.DataFrame(results)
     comparison_path = out_root / "comparison_table.csv"

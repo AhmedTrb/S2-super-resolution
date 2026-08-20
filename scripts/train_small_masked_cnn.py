@@ -463,6 +463,7 @@ class TrainConfig:
     folds: int
     model_kind: str
     band_recipe: str
+    architecture: str
     use_mask_channel: bool
     pooling_mode: str
     loss_name: str
@@ -556,6 +557,7 @@ def train_one_fold(
             image_channels=image_channels,
             use_mask_channel=cfg.use_mask_channel,
             pooling_mode=cfg.pooling_mode,
+            architecture=cfg.architecture,
             dropout=0.2,
         )
     ).to(device)
@@ -759,6 +761,7 @@ def parse_args() -> argparse.Namespace:
 
     p.add_argument("--model-kind", choices=["baseline", "cnn"], default="cnn")
     p.add_argument("--band-recipe", choices=["raw10", "paper_indices"], default="raw10")
+    p.add_argument("--architecture", choices=["residual", "plain_cnn"], default="residual")
     p.add_argument("--use-mask-channel", dest="use_mask_channel", action="store_true")
     p.add_argument("--no-use-mask-channel", dest="use_mask_channel", action="store_false")
     p.add_argument("--pooling-mode", choices=["global_avg", "masked_avg"], default="masked_avg")
@@ -816,6 +819,7 @@ def main() -> None:
         folds=int(args.folds),
         model_kind=str(args.model_kind),
         band_recipe=str(args.band_recipe),
+        architecture=str(args.architecture),
         use_mask_channel=bool(args.use_mask_channel),
         pooling_mode=str(args.pooling_mode),
         loss_name=str(args.loss),

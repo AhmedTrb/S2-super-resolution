@@ -45,11 +45,25 @@ class DownsampleBlock(nn.Module):
         return self.act(self.gn(self.conv(x)))
 
 
+class PlainConvBlock(nn.Module):
+    """Non-residual conv block: Conv2d -> GroupNorm -> ReLU, no skip connection."""
+
+    def __init__(self, in_ch: int, out_ch: int, stride: int = 1) -> None:
+        super().__init__()
+        self.conv = nn.Conv2d(in_ch, out_ch, kernel_size=3, stride=stride, padding=1, bias=False)
+        self.gn = _group_norm(out_ch)
+        self.act = nn.ReLU(inplace=True)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.act(self.gn(self.conv(x)))
+
+
 @dataclass(frozen=True)
 class SmallMaskedCNNConfig:
     image_channels: int = 10
     use_mask_channel: bool = True
     pooling_mode: str = "masked_avg"  # "masked_avg" or "global_avg"
+    architecture: str = "residual"  # "residual" or "plain_cnn" (3 non-residual conv blocks)
     dropout: float = 0.2
     eps: float = 1e-6
 
@@ -71,13 +85,22 @@ class SmallMaskedCNNRegressor(nn.Module):
             _group_norm(24),
             nn.ReLU(inplace=True),
         )
-        self.res1 = ResidualBlock(24)
 
-        self.down1 = DownsampleBlock(24, 48)
-        self.res2 = ResidualBlock(48)
-
-        self.down2 = DownsampleBlock(48, 64)
-        self.res3 = ResidualBlock(64)
+        if self.config.architecture == "residual":
+            self.res1 = ResidualBlock(24)
+            self.down1 = DownsampleBlock(24, 48)
+            self.res2 = ResidualBlock(48)
+            self.down2 = DownsampleBlock(48, 64)
+            self.res3 = ResidualBlock(64)
+        elif self.config.architecture == "plain_cnn":
+            # 3 normal (non-residual) conv blocks with the same channel/stride progression.
+            self.res1 = PlainConvBlock(24, 24, stride=1)
+            self.down1 = PlainConvBlock(24, 48, stride=2)
+            self.res2 = nn.Identity()
+            self.down2 = PlainConvBlock(48, 64, stride=2)
+            self.res3 = nn.Identity()
+        else:
+            raise ValueError(f"Unsupported architecture={self.config.architecture!r}")
 
         self.head = nn.Sequential(
             nn.Linear(65, 32),
