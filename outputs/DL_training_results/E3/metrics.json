@@ -1,0 +1,19 @@
+{
+  "experiment": "E3",
+  "resolution": "sr",
+  "band_recipe": "raw10",
+  "patch_size": 256,
+  "image_channels": 10,
+  "total_params": 168921,
+  "trainable_params": 168921,
+  "best_epoch": 22,
+  "train_MAE": 13.821805693905246,
+  "train_RMSE": 20.26358979619585,
+  "train_R2": 0.7183077136455797,
+  "val_MAE": 13.677883308145065,
+  "val_RMSE": 21.605753393194803,
+  "val_R2": 0.6544262787136687,
+  "test_MAE": 18.293740175991204,
+  "test_RMSE": 24.224059509837694,
+  "test_R2": 0.6336746659475696
+}

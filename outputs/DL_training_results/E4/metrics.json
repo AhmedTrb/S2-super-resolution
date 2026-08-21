@@ -1,0 +1,19 @@
+{
+  "experiment": "E4",
+  "resolution": "sr",
+  "band_recipe": "paper_indices",
+  "patch_size": 256,
+  "image_channels": 8,
+  "total_params": 168489,
+  "trainable_params": 168489,
+  "best_epoch": 37,
+  "train_MAE": 9.936853591391372,
+  "train_RMSE": 17.79590457369772,
+  "train_R2": 0.7827387265512182,
+  "val_MAE": 15.358829345884203,
+  "val_RMSE": 23.061264798567688,
+  "val_R2": 0.6062975428708247,
+  "test_MAE": 17.495810385009175,
+  "test_RMSE": 22.844569890195952,
+  "test_R2": 0.6742090048175159
+}

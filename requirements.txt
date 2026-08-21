@@ -1,0 +1,37 @@
+# Core scientific stack
+numpy
+pandas
+scipy
+
+# Geospatial I/O and vector/raster processing
+geopandas
+rasterio
+shapely
+pyproj
+
+# Super-resolution model runtime (SEN2SRLite via TacoFoundation)
+mlstac
+sen2sr
+
+# Deep learning
+torch
+torchvision
+torchgeo
+
+# Classical ML regressors and utilities
+scikit-learn
+scikit-image
+xgboost
+lightgbm
+catboost
+
+# Plotting
+matplotlib
+seaborn
+
+# Notebooks
+jupyter
+ipykernel
+
+# Misc utilities
+tqdm
